@@ -139,10 +139,10 @@ export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, on
       const startX = e.clientX - rect.left;
       const startY = e.clientY - rect.top + (scrollRef.current?.scrollTop || 0);
       fretMarqueeRef.current = { startX, startY, didMove: false };
-      if (!selectedNotesRef || selectedNotesRef.current.size === 0) {
-        setSelectedNotes(new Set());
-      }
-
+      
+      // Capture current selection so shift-drag accumulates instead of replacing
+      const initialSelection = selectedNotes.size > 0 ? new Set(selectedNotes) : new Set();
+    
       const handleMarqueeMove = (moveE) => {
         if (!fretMarqueeRef.current) return;
         const mx = moveE.clientX - rect.left;
@@ -151,14 +151,13 @@ export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, on
         const dy = my - fretMarqueeRef.current.startY;
         if (!fretMarqueeRef.current.didMove && Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
         fretMarqueeRef.current.didMove = true;
-
+    
         const x1 = Math.min(fretMarqueeRef.current.startX, mx);
         const y1 = Math.min(fretMarqueeRef.current.startY, my);
         const x2 = Math.max(fretMarqueeRef.current.startX, mx);
         const y2 = Math.max(fretMarqueeRef.current.startY, my);
         setFretMarquee({ x1, y1, x2, y2 });
-
-        // Select active notes whose fretboard position falls within the marquee
+    
         const selected = new Set();
         const containerW = container.clientWidth;
         const usableW = containerW * (100 - PADDING_LEFT - PADDING_RIGHT) / 100;
@@ -174,16 +173,20 @@ export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, on
             if (idx >= 0) selected.add(idx);
           }
         });
-        setSelectedNotes(selected);
+    
+        // Merge previous selection with current marquee (additive behavior)
+        const merged = new Set(initialSelection);
+        selected.forEach(i => merged.add(i));
+        setSelectedNotes(merged);
       };
-
+    
       const handleMarqueeUp = () => {
         fretMarqueeRef.current = null;
         setFretMarquee(null);
         window.removeEventListener('mousemove', handleMarqueeMove);
         window.removeEventListener('mouseup', handleMarqueeUp);
       };
-
+    
       window.addEventListener('mousemove', handleMarqueeMove);
       window.addEventListener('mouseup', handleMarqueeUp);
       e.preventDefault();
