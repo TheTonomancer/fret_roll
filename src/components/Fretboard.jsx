@@ -139,7 +139,9 @@ export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, on
       const startX = e.clientX - rect.left;
       const startY = e.clientY - rect.top + (scrollRef.current?.scrollTop || 0);
       fretMarqueeRef.current = { startX, startY, didMove: false };
-      setSelectedNotes(new Set());
+      if (!selectedNotesRef || selectedNotesRef.current.size === 0) {
+        setSelectedNotes(new Set());
+      }
 
       const handleMarqueeMove = (moveE) => {
         if (!fretMarqueeRef.current) return;
@@ -324,7 +326,7 @@ export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, on
       setDragNote(result);
       e.preventDefault();
     }
-  }, [getStringAndFret, activeNotes, durationMode, moveMode, adjacentMode, freeMode, onDurationChange, onBeatChange, fingeringMode, notes, selectedBeat, setSelectedNotes]);
+  }, [getStringAndFret, activeNotes, durationMode, moveMode, adjacentMode, freeMode, onDurationChange, onBeatChange, fingeringMode, notes, selectedBeat, selectedNotes, setSelectedNotes]);
 
   const handleMouseUp = useCallback((e) => {
     // Block all other interactions in modifier modes (except adjacent)
