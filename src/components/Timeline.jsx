@@ -876,7 +876,7 @@ export default function Timeline({
 
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
-  }, [playing, notes, setSelectedNotes, setNotes, machineGunMode, noteDuration, saveSnapshot, yToPitch, freeMode, snapUnit, cellWidth, barSubdivisions, totalCols, defaultVelocity, setSelectedBeat, rowHeight]);
+  }, [playing, notes, selectedNotes, setSelectedNotes, setNotes, machineGunMode, noteDuration, saveSnapshot, yToPitch, freeMode, snapUnit, cellWidth, barSubdivisions, totalCols, defaultVelocity, setSelectedBeat, rowHeight]);
 
   // Sync vertical scroll from external source (fretboard)
   useEffect(() => {
