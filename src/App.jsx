@@ -285,6 +285,7 @@ function App() {
   loopStartRef.current = loopStart;
   loopEndRef.current = loopEnd;
 
+  /*
   // Auto-select notes at the playhead whenever it moves (not during playback).
   useEffect(() => {
     if (playing) return;
@@ -296,6 +297,7 @@ function App() {
     });
     setSelectedNotes(atBeat);
   }, [selectedBeat, playing]);
+  */
 
   // Build synesthesia lookup: note letter (without octave) -> color
   const synesthesiaMap = {};
