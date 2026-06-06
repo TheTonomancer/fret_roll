@@ -551,6 +551,14 @@ function App() {
         });
         setSelectedNotes(atBeat);
       }
+      
+      //Added event listener for the clear selections hotkey...
+            if (matchesHotkey(e, hk.clearSelection)) {
+        e.preventDefault();
+        setSelectedNotes(new Set());
+      }
+      // ... which sets the selected note state to empty     
+      
       if (matchesHotkey(e, hk.deleteNotes) || matchesHotkey(e, hk.deleteNotesAlt)) {
         if (selectedNotesRef.current.size > 0) {
           e.preventDefault();
@@ -566,6 +574,7 @@ function App() {
           ));
         }
       }
+      
       // Transpose selected notes via configurable hotkeys.
       let transposeHandled = false;
       const isSemiUp = matchesHotkey(e, hk.transposeSemiUp);
