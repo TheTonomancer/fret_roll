@@ -229,9 +229,11 @@ export default function SettingsModal({ appState, onApplyState, onClose, onHotke
               </button>
             </div>
             <div className="settings-row-btns">
-              <button className="settings-btn" onClick={() => exportToFile(getSessionState(appState), `${appState.projectName || 'guitar-roll'}.json`)}>
+              <button className="settings-btn" onClick={async () => {
+                await exportToFile(getSessionState(appState), `${appState.projectName || 'guitar-roll'}.json`);
+              }}>
                 Export to File
-              </button>
+              </button>    
               <button className="settings-btn" onClick={async () => {
                 try {
                   const data = await importFromFile();
