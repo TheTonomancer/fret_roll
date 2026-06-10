@@ -10,7 +10,7 @@ import { putAudioFile, getAudioFile, deleteAudioFile } from './utils/audioStore'
 import { parseMidi, midiToGuitarNotes } from './utils/midiImport';
 import { stateFromUrl, saveColorScheme, saveChordLibrary, getSessionState, saveAutosave, loadAutosave, listColorSchemes } from './utils/storage';
 import { loadHotkeys, matchesHotkey, formatHotkey, REFERENCE_ACTIONS } from './utils/hotkeys';
-import { getMidiNote, closestComboForPitch } from './utils/pitchMap';
+import { getMidiNote, closestComboForPitch, getComboForPosition } from './utils/pitchMap';
 import { NUM_STRINGS, NUM_FRETS } from './utils/constants';
 import SettingsModal from './components/SettingsModal';
 import TrackStrip from './components/TrackStrip';
@@ -274,6 +274,17 @@ function App() {
   const selectedBeatRef = useRef(selectedBeat);
   const animFrameRef = useRef(null);
 
+  const [position, setPosition] = useState(() => 0);
+  const positionRef = useRef(position);
+  positionRef.current = position;
+  const [positionMode, setPositionMode] = useState(false);
+  const positionModeRef = useRef(false);
+  positionModeRef.current = positionMode;
+  const [positionModeValue, setPositionModeValue] = useState(null);
+  const positionBufferRef = useRef([]);
+  const numberKeysDownRef = useRef(new Set());
+  const positionTimeoutRef = useRef(null);
+
   const timeSigRef = useRef(timeSignature);
 
   // Keep refs in sync
@@ -318,6 +329,7 @@ function App() {
 
   // Apply partial state from settings/load/URL
   const applyState = useCallback((data) => {
+    setPosition(0);  // reset position on any new session load or import
     if (data.tracks !== undefined) {
       setTracksTracked(data.tracks);
       const firstId = data.tracks[0]?.id;
@@ -444,6 +456,66 @@ function App() {
     const handleKeyDown = (e) => {
       if (e.target.tagName === 'INPUT') return;
       const hk = hotkeysRef.current;
+
+      // Position selection mode: number keys accumulate position value
+      if (positionModeRef.current) {
+        if (e.key >= '0' && e.key <= '9') {
+          e.preventDefault();
+          if (positionTimeoutRef.current) {
+            clearTimeout(positionTimeoutRef.current);
+            positionTimeoutRef.current = null;
+          }
+          if (!numberKeysDownRef.current.has(e.key)) {
+            const canAdd =
+              positionBufferRef.current.length === 0 ||
+              (positionBufferRef.current.length === 1 &&
+              (positionBufferRef.current[0] === '1' || positionBufferRef.current[0] === '2'));
+            if (canAdd) {
+              numberKeysDownRef.current.add(e.key);
+              positionBufferRef.current.push(e.key);
+              setPositionModeValue(parseInt(positionBufferRef.current.join(''), 10));
+            }
+          }
+          return;
+        }
+        if (e.key === 'Backspace') {
+          e.preventDefault();
+          if (positionTimeoutRef.current) {
+            clearTimeout(positionTimeoutRef.current);
+            positionTimeoutRef.current = null;
+          }
+          positionBufferRef.current.pop();
+          setPositionModeValue(positionBufferRef.current.length > 0 ? parseInt(positionBufferRef.current.join(''), 10) : null);
+          return;
+        }
+        // This chunk makes it so that position mode can be canceled...
+        if (e.key === 'Escape' || matchesHotkey(e, hk.positionMode)) {
+          e.preventDefault();
+          if (positionTimeoutRef.current) {
+            clearTimeout(positionTimeoutRef.current);
+            positionTimeoutRef.current = null;
+          }
+          setPositionMode(false);
+          positionModeRef.current = false;
+          positionBufferRef.current = [];
+          setPositionModeValue(null);
+          numberKeysDownRef.current.clear();
+          return;
+        }       
+        // ...with Esc or the Position mode Hot key 
+        return;
+      }
+
+      // Enter position mode on P
+      if (matchesHotkey(e, hk.positionMode)) {
+        e.preventDefault();
+        setPositionMode(true);
+        positionModeRef.current = true;
+        positionBufferRef.current = [];
+        setPositionModeValue(null);
+        numberKeysDownRef.current.clear();
+        return;
+      }
 
       // Number keys 1-9: set tuplet subdivision
       if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key >= '1' && e.key <= '9') {
@@ -693,7 +765,44 @@ function App() {
       }
     };
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    const handleKeyUp = (e) => {
+      if (!positionModeRef.current) return;
+      if (e.key >= '0' && e.key <= '9') {
+        numberKeysDownRef.current.delete(e.key);
+        // Only arm timeout if all number keys are released AND buffer has exactly one digit of '1' or '2'
+        if (numberKeysDownRef.current.size === 0 && positionBufferRef.current.length === 1) {
+          const buffered = positionBufferRef.current[0];
+          if (buffered === '1' || buffered === '2') {
+            positionTimeoutRef.current = setTimeout(() => {
+              numberKeysDownRef.current.clear();
+              const pos = Math.min(NUM_FRETS, Math.max(0, parseInt(positionBufferRef.current.join(''), 10)));
+              setPosition(pos);
+              positionBufferRef.current = [];
+              setPositionModeValue(null);
+              setPositionMode(false);
+              positionModeRef.current = false;
+              positionTimeoutRef.current = null;
+            }, 1000); // 1 second grace window
+            return;
+          }
+        }
+        // Normal commit: all keys up and buffer has a complete number (or no timeout window applies)
+        if (numberKeysDownRef.current.size === 0 && positionTimeoutRef.current === null && positionBufferRef.current.length > 0) {
+          const pos = Math.min(NUM_FRETS, Math.max(0, parseInt(positionBufferRef.current.join(''), 10)));
+          setPosition(pos);
+          positionBufferRef.current = [];
+          setPositionModeValue(null);
+          setPositionMode(false);
+          positionModeRef.current = false;
+        }
+      }
+    };
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      if (positionTimeoutRef.current) clearTimeout(positionTimeoutRef.current);
+    };
   }, [totalBeats, undo, redo, setNotes]);
 
   const handleFretClick = useCallback((stringIndex, fret) => {
@@ -1488,6 +1597,11 @@ function App() {
         <span style={{ color: (freeMode || fingeringMode || machineGunMode) ? '#e67e22' : '#888' }}>
           {freeMode ? 'FREE ' : ''}{fingeringMode ? 'FINGERING ' : ''}{machineGunMode ? 'DRAW ' : ''}{notes.length} notes{selectedNotes.size > 0 ? ` (${selectedNotes.size} selected)` : ''} | Beat: {selectedBeat + 1} | Bar: {Math.floor(selectedBeat / SUBDIVISIONS) + 1}
         </span>
+        {positionMode ? <span style={{ color: '#3498db', marginLeft: 8 }}>Select Position {positionModeValue != null ? `(${positionModeValue})` : ''}</span> : null}
+        {!positionMode && (() => {
+          const romanNumerals = ['O','I','II','III','IV','V','VI','VII','VIII','IX','X','XI','XII','XIII','XIV','XV','XVI','XVII','XVIII','XIX','XX','XXI','XXII','XXIII','XXIV'];
+          return <span style={{ color: '#ccc', marginLeft: 8 }}>Pos: {romanNumerals[Math.min(position, romanNumerals.length - 1)]}</span>;
+        })()}
         <span className="status-separator" />
         <span className="toolbar-label">Vel:</span>
         <input
@@ -1584,6 +1698,8 @@ function App() {
           timelineBodyRef={timelineBodyRef}
           timelineZoom={timelineZoom}
           barSubdivisions={barSubdivisions}
+          position={position}
+          setPosition={setPosition}          
         />
         <Timeline
           notes={notes}
@@ -1608,6 +1724,7 @@ function App() {
           barSubdivisions={barSubdivisions}
           setBarSubdivisions={setBarSubdivisions}
           setTimelineZoom={setTimelineZoom}
+          position={position}
           currentBeat={currentBeat}
           playheadBeatRef={playheadBeatRef}
           selectedBeat={selectedBeat}
@@ -1663,6 +1780,8 @@ function App() {
           bpm={bpm}
           timeSignature={timeSignature}
           bodyRefExternal={timelineBodyRef}
+          position={position}
+          setPosition={setPosition}
         />
         <div className={`chord-sidebar ${chordPaletteOpen ? 'open' : ''}`}>
           <button className="chord-sidebar-toggle" onClick={() => setChordPaletteOpen(o => !o)}>
