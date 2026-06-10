@@ -32,6 +32,7 @@ const DEFAULT_HOTKEYS = {
   voiceLeading: { label: 'Voice Leading', description: 'Open voice leading assistant for selected chords', key: 'v' },
   machineGunMode: { label: 'Machine Gun', description: 'Toggle draw mode: drag to paint notes', key: 'd' },
   fingeringMode: { label: 'Fingering Mode', description: 'Toggle fingering mode (arrow keys shift strings)', key: 'g' },
+  positionMode: { label: 'Position Mode', description: 'Set guitar position via number keys (P to enter, then type fret number)', key: 'p' },
   fingerUp: { label: 'Finger Up', description: 'Move selected notes to higher string (same pitch)', key: 'ArrowUp' },
   fingerDown: { label: 'Finger Down', description: 'Move selected notes to lower string (same pitch)', key: 'ArrowDown' },
   zoomWheel: { label: 'Zoom (Scroll)', description: 'Scroll to zoom timeline', key: 'Wheel', modifiers: { ctrl: true }, wheel: true },
@@ -151,7 +152,7 @@ export const EDITABLE_HOTKEYS = [
   'prevMarker', 'nextMarker', 'playStop', 'returnToStart', 'prevBeat', 'nextBeat',
   'jumpPrevNote', 'jumpNextNote',
   'zoomIn', 'zoomOut', 'zoomWheel', 'verticalZoomIn', 'verticalZoomOut', 'verticalZoomWheel', 'velocityWheel',
-  'machineGunMode', 'fingeringMode', 'fingerUp', 'fingerDown',
+  'machineGunMode', 'fingeringMode', 'positionMode', 'fingerUp', 'fingerDown',
   'transposeSemiUp', 'transposeSemiDown', 'transposeOctaveUp', 'transposeOctaveDown', 'selectAtPlayhead',
   'clearSelection', 'cursorMode', 'cheatSheet', 'escape',
 ];
