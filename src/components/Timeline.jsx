@@ -6,7 +6,7 @@ import {
 import { getNoteName, playNote } from '../utils/audio';
 import {
   TOTAL_PITCH_ROWS, PITCH_LIST, noteToPitchRow, pitchRowToMidi,
-  midiToNoteName, getMidiNote, closestComboForPitch, pitchRowCombos
+  midiToNoteName, getMidiNote, closestComboForPitch, pitchRowCombos, getComboForPosition
 } from '../utils/pitchMap';
 import { totalColumns, barStartBeats, beatToBar, beatLabel, isBarStart, remapNotes, beatToX, xToBeat, gridTotalWidth, colWidth, durationToWidth, timeToBeat } from '../utils/barLayout';
 import { matchesWheelHotkey } from '../utils/hotkeys';
@@ -55,6 +55,8 @@ export default function Timeline({
   bpm = 120,
   timeSignature = [4, 4],
   bodyRefExternal,
+  position = 0,
+  setPosition,
 }) {
   const bodyRef = useRef(null);
   const headerRef = useRef(null);
@@ -110,9 +112,10 @@ export default function Timeline({
     const rowFromTop = Math.floor(y / rowHeight);
     const pitchRow = Math.max(0, Math.min(totalRows - 1, totalRows - 1 - rowFromTop));
     const midi = pitchRowToMidi(pitchRow);
-    const combo = closestComboForPitch(midi, 0);
-    return combo;
-  }, [rowHeight]);
+    const result = getComboForPosition(midi, position);
+    if (!result) return null;
+    return { stringIndex: result.stringIndex, fret: result.fret, _newPosition: result.position };
+  }, [rowHeight, position]);
 
   // Track K key for cursor-only mode (deselect + place cursor, no note input)
   useEffect(() => {
@@ -415,6 +418,10 @@ export default function Timeline({
       const d = noteDragRef.current;
       if (d && d.didMove) {
         const { affectedIndices, startPositions, lastDeltaBeat, lastDeltaRow } = d;
+        const oldPitchRow = noteToPitchRow(startPositions.get(affectedIndices[0]).stringIndex, startPositions.get(affectedIndices[0]).fret);
+        const newPitchRow = Math.max(0, Math.min(totalRows - 1, oldPitchRow + lastDeltaRow));
+        const newMidi = pitchRowToMidi(newPitchRow);
+        const smartCombo = newMidi != null ? getComboForPosition(newMidi, position) : null;
         if (d.isDuplicate) {
           // Duplicate: keep originals, add copies at new positions
           setNotes(old => {
@@ -447,6 +454,9 @@ export default function Timeline({
             return { ...n, beat: newBeat, stringIndex: combo.stringIndex, fret: combo.fret };
           }));
         }
+        if (smartCombo && smartCombo.position != null && smartCombo.position !== position && setPosition) {
+          setPosition(smartCombo.position);
+        }
       }
       setDragPreview(null);
       noteDragRef.current = null;
@@ -456,7 +466,7 @@ export default function Timeline({
 
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
-  }, [notes, setNotes, selectedNotes, freeMode, rowHeight]);
+  }, [notes, setNotes, selectedNotes, freeMode, rowHeight, position, setPosition]);
 
   // Loop region drag on header
   const handleHeaderMouseDown = useCallback((e) => {
@@ -714,8 +724,12 @@ export default function Timeline({
         const occupied = new Set(
           notes.filter(n => Math.abs(n.beat - finalBeatForCombo) < 0.001).map(n => n.stringIndex)
         );
-        const free = allCombos.find(c => !occupied.has(c.stringIndex));
-        const combo = free || closestComboForPitch(midiTarget, 0);
+
+        const posEnd = Math.min(position + 4, NUM_FRETS);
+        const inPosition = allCombos.filter(c => c.fret >= position && c.fret <= posEnd);
+        const freeInPosition = inPosition.find(c => !occupied.has(c.stringIndex));
+        const combo = freeInPosition || getComboForPosition(midiTarget, position);
+
         if (combo) {
           const finalBeat = finalBeatForCombo;
           // Check if toggling off an existing note
@@ -752,6 +766,9 @@ export default function Timeline({
           setSelectedNotes(new Set());
           playNote(combo.stringIndex, combo.fret, 0.2);
           marqueeDidDragRef.current = true; // prevent handleClick from also firing
+          if (combo.position != null && combo.position !== position && setPosition) {
+            setPosition(combo.position);
+          }
 
           if (!toggled) {
             // Start drag-to-resize the newly placed note.
@@ -876,7 +893,7 @@ export default function Timeline({
 
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
-  }, [playing, notes, selectedNotes, setSelectedNotes, setNotes, machineGunMode, noteDuration, saveSnapshot, yToPitch, freeMode, snapUnit, cellWidth, barSubdivisions, totalCols, defaultVelocity, setSelectedBeat, rowHeight]);
+  }, [playing, notes, selectedNotes, setSelectedNotes, setNotes, machineGunMode, noteDuration, saveSnapshot, yToPitch, freeMode, snapUnit, cellWidth, barSubdivisions, totalCols, defaultVelocity, setSelectedBeat, rowHeight, position, setPosition]);
 
   // Sync vertical scroll from external source (fretboard)
   useEffect(() => {
