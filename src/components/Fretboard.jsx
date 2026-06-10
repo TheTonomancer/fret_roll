@@ -1,3 +1,4 @@
+import { getMidiNote, getComboForPosition } from '../utils/pitchMap';
 import { useRef, useState, useCallback, useEffect } from 'react';
 import { NUM_STRINGS, NUM_FRETS, FRET_DOTS, DOUBLE_DOTS, CELL_WIDTH, SUBDIVISIONS } from '../utils/constants';
 import { playNote, getNoteName } from '../utils/audio';
@@ -16,7 +17,7 @@ const TOTAL_CELLS = NUM_FRETS + 1;
 
 
 
-export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, onDurationChange, onBeatChange, saveSnapshot, commitDrag, freeMode = false, totalBeats, activeNotes = [], backgroundActiveNotes = [], playingNotes = [], stringColors, getNoteColor, hoveredNote, setHoveredNote, hotkeys, hoverPreview = false, hoverVolume = 0.3, snapUnit = 1, fretboardZoom = 1, setFretboardZoom, voicingPreview, fingeringMode = false, onExitFingeringMode, onDeleteNote, notes = [], selectedBeat, selectedNotes, setSelectedNotes, autoScroll, hoverPill, timelineBodyRef, timelineZoom = 1, barSubdivisions = 4 }) {
+export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, onDurationChange, onBeatChange, saveSnapshot, commitDrag, freeMode = false, totalBeats, activeNotes = [], backgroundActiveNotes = [], playingNotes = [], stringColors, getNoteColor, hoveredNote, setHoveredNote, hotkeys, hoverPreview = false, hoverVolume = 0.3, snapUnit = 1, fretboardZoom = 1, setFretboardZoom, voicingPreview, fingeringMode = false, onExitFingeringMode, onDeleteNote, notes = [], selectedBeat, selectedNotes, setSelectedNotes, autoScroll, hoverPill, timelineBodyRef, timelineZoom = 1, barSubdivisions = 4, position = 0, setPosition}) {
   const FRET_HEIGHT = BASE_FRET_HEIGHT * fretboardZoom;
   const GRID_HEIGHT = TOTAL_CELLS * FRET_HEIGHT;
   const cellTopPx = (cell) => cell * FRET_HEIGHT;
@@ -380,8 +381,19 @@ export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, on
       } else {
         onNoteClick(result.stringIndex, result.fret);
       }
+      const fret = result.fret;
+      const posEnd = Math.min(position + 4, NUM_FRETS);
+      let newPos = position;
+      if (fret < position) {
+        newPos = Math.max(0, fret);
+      } else if (fret > posEnd) {
+        newPos = Math.max(0, Math.min(NUM_FRETS - 4, fret - 4));
+      }
+      if (newPos !== position && setPosition) {
+        setPosition(newPos);
+      }
     }
-  }, [getStringAndFret, onNoteClick, onAdjacentClick, onMoveNote, durationMode, adjacentMode, moveMode, fingeringMode, notes, selectedBeat, setSelectedNotes]);
+  }, [getStringAndFret, onNoteClick, onAdjacentClick, onMoveNote, durationMode, adjacentMode, moveMode, fingeringMode, notes, selectedBeat, setSelectedNotes, position, setPosition]);
 
 
   // Auto-scroll fretboard to show hovered note (from piano roll — only when local hover is null)
