@@ -1,6 +1,6 @@
 import { compressToEncodedURIComponent, decompressFromEncodedURIComponent } from 'lz-string';
 import { NUM_BARS, SUBDIVISIONS, BPM } from './constants';
-import { loadCustomPresets, saveCustomPreset } from './audio';
+import { loadCustomPresets } from './audio';
 
 const STORAGE_KEY = 'guitar-roll-sessions';
 const SCHEMES_KEY = 'guitar-roll-color-schemes';
@@ -58,7 +58,7 @@ export function getSessionState(appState) {
     metronome: appState.metronome,
     barSubdivisions: appState.barSubdivisions,
     activeColorScheme: appState.activeColorScheme || null,
-    colorSchemes: listColorSchemes(),
+    colorSchemes: getSessionColorSchemes(appState),
     synthPresets: loadCustomPresets(),
     chordLibrary: loadChordLibrary(),
   };
@@ -95,6 +95,37 @@ export function listColorSchemes() {
     const raw = localStorage.getItem(SCHEMES_KEY);
     return raw ? JSON.parse(raw) : {};
   } catch { return {}; }
+}
+
+// Only include color schemes that are actually referenced by the current session.
+// This keeps exported/imported session files focused on the session instead of
+// copying the user's entire saved color scheme library.
+export function getSessionColorSchemes(appState) {
+  const allSchemes = listColorSchemes();
+  const sessionSchemes = {};
+
+  const addScheme = (name, fallbackColors) => {
+    if (!name) return;
+
+    if (Object.prototype.hasOwnProperty.call(allSchemes, name)) {
+      sessionSchemes[name] = allSchemes[name];
+    } else if (fallbackColors) {
+      sessionSchemes[name] = fallbackColors;
+    }
+  };
+
+  if (appState.activeColorScheme?.name) {
+    addScheme(
+      appState.activeColorScheme.name,
+      appState.activeColorScheme.colors
+    );
+  }
+
+  (appState.tracks || []).forEach(track => {
+    addScheme(track.schemeName);
+  });
+
+  return sessionSchemes;
 }
 
 export function saveColorScheme(name, scheme) {
@@ -164,7 +195,8 @@ export function importFromFile() {
 
 // --- URL compression ---
 export function stateToUrl(state) {
-  const { colorSchemes, ...urlState } = state;
+  const urlState = { ...state };
+  delete urlState.colorSchemes;
   // Only include the active color scheme, not all saved schemes
   if (urlState.activeColorScheme) {
     urlState.colorSchemes = { [urlState.activeColorScheme.name]: urlState.activeColorScheme.colors };
