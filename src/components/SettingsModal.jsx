@@ -50,24 +50,100 @@ function defaultSchemeColors() {
   return colors;
 }
 
+function colorsToSynesthesia(colors) {
+  return Object.entries(colors)
+    .filter(entry => entry[1] !== '#ffffff')
+    .map(([note, color]) => ({ note, color }));
+}
+
+function getActiveSchemes(appState, savedSchemes) {
+  const map = new Map();
+
+  const addScheme = (name, colors, source) => {
+    if (!name) return;
+
+    if (!map.has(name)) {
+      map.set(name, {
+        name,
+        colors: savedSchemes[name] || colors || {},
+        sources: [],
+      });
+    }
+
+    if (source && !map.get(name).sources.includes(source)) {
+      map.get(name).sources.push(source);
+    }
+  };
+
+  if (appState.activeColorScheme?.name) {
+    addScheme(
+      appState.activeColorScheme.name,
+      appState.activeColorScheme.colors,
+      'Global scheme'
+    );
+  }
+
+  (appState.tracks || []).forEach(track => {
+    if (track.schemeName) {
+      addScheme(
+        track.schemeName,
+        savedSchemes[track.schemeName],
+        `Track: ${track.name || track.id}`
+      );
+    }
+  });
+
+  return Array.from(map.values());
+}
+
 export default function SettingsModal({ appState, onApplyState, onClose, onHotkeysChange, hoverPreview, onHoverPreviewChange, tupletLines, onTupletLinesChange, autoScroll, onAutoScrollChange, hoverPill, onHoverPillChange, autoSave, onAutoSaveChange, showTimelineVerticalZoomButtons, onShowTimelineVerticalZoomButtonsChange }) {
   const [page, setPage] = useState('main'); // main, schemes, editScheme, sessions, hotkeys
-  const [schemes, setSchemes] = useState(listColorSchemes);
-  const [editingScheme, setEditingScheme] = useState(null); // { name, colors }
+  const [editingScheme, setEditingScheme] = useState(null); // { name, originalName, colors }
   const [sessions, setSessions] = useState(listSessions);
   const [sessionName, setSessionName] = useState('');
   const [copyMsg, setCopyMsg] = useState('');
   const [confirm, setConfirm] = useState(null); // { message, onConfirm }
 
-  const refreshSchemes = () => setSchemes(listColorSchemes());
   const refreshSessions = () => setSessions(listSessions());
 
   // Apply a color scheme to the app
   const applyScheme = (name, colors) => {
-    const synesthesia = Object.entries(colors)
-      .filter(([_, c]) => c !== '#ffffff')
-      .map(([note, color]) => ({ note, color }));
-    onApplyState({ synesthesia, activeColorScheme: { name, colors } });
+    onApplyState({
+      synesthesia: colorsToSynesthesia(colors),
+      activeColorScheme: { name, colors },
+    });
+  };
+
+  const removeSchemeFromSession = (name) => {
+    const updates = {};
+
+    if (appState.activeColorScheme?.name === name) {
+      updates.activeColorScheme = null;
+      updates.synesthesia = [];
+    }
+
+    if ((appState.tracks || []).some(track => track.schemeName === name)) {
+      updates.tracks = (appState.tracks || []).map(track =>
+        track.schemeName === name
+          ? { ...track, schemeName: null }
+          : track
+      );
+    }
+
+    if (Object.keys(updates).length > 0) {
+      onApplyState(updates);
+    }
+  };
+
+  const deleteScheme = (name) => {
+    setConfirm({
+      message: `Delete color scheme "${name}"?`,
+      onConfirm: () => {
+        deleteColorScheme(name);
+        removeSchemeFromSession(name);
+        setConfirm(null);
+      },
+    });
   };
 
   // --- Main page ---
@@ -238,7 +314,9 @@ export default function SettingsModal({ appState, onApplyState, onClose, onHotke
                 try {
                   const data = await importFromFile();
                   onApplyState(data);
-                } catch {}
+                } catch (error) {
+                  console.warn('Import failed', error);
+                }
               }}>
                 Import from File
               </button>
@@ -266,48 +344,113 @@ export default function SettingsModal({ appState, onApplyState, onClose, onHotke
     );
   }
 
-  // --- Color Schemes list page ---
+  // --- Color Schemes manager page ---
   if (page === 'schemes') {
-    const schemeNames = Object.keys(schemes);
+    const savedSchemes = listColorSchemes();
+    const activeSchemes = getActiveSchemes(appState, savedSchemes);
+    const savedSchemesList = Object.entries(savedSchemes)
+      .map(([name, colors]) => ({ name, colors }));
+
+    function SchemePalette({ colors }) {
+      return (
+        <div className="scheme-colors-preview">
+          {CHROMATIC_INTERNAL.map(n => (
+            <div
+              key={n}
+              className="scheme-color-dot"
+              style={{ background: colors?.[n] || '#ffffff' }}
+            />
+          ))}
+        </div>
+      );
+    }
+
+    function SchemeItem({ scheme, isActive, sources }) {
+      return (
+        <div className="scheme-item">
+          <div className="scheme-row">
+            <span className="scheme-name">
+              {scheme.name}
+              {isActive && <span className="scheme-active-badge">Active</span>}
+            </span>
+          </div>
+
+          <SchemePalette colors={scheme.colors} />
+
+          {sources?.length > 0 && (
+            <div className="scheme-source">
+              Used by: {sources.join(', ')}
+            </div>
+          )}
+
+          <div className="scheme-actions">
+            <button className="settings-btn-sm" onClick={() => applyScheme(scheme.name, scheme.colors)}>Apply</button>
+            <button className="settings-btn-sm" onClick={() => {
+              setEditingScheme({
+                name: scheme.name,
+                originalName: scheme.name,
+                colors: { ...scheme.colors },
+              });
+              setPage('editScheme');
+            }}>Edit</button>
+            {isActive && (
+              <button className="settings-btn-sm" onClick={() => removeSchemeFromSession(scheme.name)}>
+                Un-Apply
+              </button>
+            )}
+            <button className="settings-btn-sm danger" onClick={() => deleteScheme(scheme.name)}>Delete</button>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="settings-overlay" onClick={onClose}>
         <div className="settings-popup" onClick={e => e.stopPropagation()}>
           <h2 className="settings-title">Color Schemes</h2>
 
-          <div className="schemes-list">
-            {schemeNames.length === 0 && (
-              <p className="settings-empty">No color schemes saved yet.</p>
-            )}
-            {schemeNames.map(name => (
-              <div key={name} className="scheme-item">
-                <span className="scheme-name">{name}</span>
-                <div className="scheme-row">
-                  <div className="scheme-colors-preview">
-                    {CHROMATIC_INTERNAL.map(n => (
-                      <div key={n} className="scheme-color-dot" style={{ background: schemes[name][n] || '#ffffff' }} />
-                    ))}
-                  </div>
-                  <div className="scheme-actions">
-                    <button className="settings-btn-sm" onClick={() => applyScheme(name, schemes[name])}>Apply</button>
-                    <button className="settings-btn-sm" onClick={() => {
-                      setEditingScheme({ name, colors: { ...schemes[name] } });
-                      setPage('editScheme');
-                    }}>Edit</button>
-                    <button className="settings-btn-sm danger" onClick={() => {
-                      setConfirm({
-                        message: `Delete color scheme "${name}"?`,
-                        onConfirm: () => { deleteColorScheme(name); refreshSchemes(); setConfirm(null); },
-                      });
-                    }}>Delete</button>
-                  </div>
-                </div>
-              </div>
-            ))}
+          <div className="settings-section">
+            <h3>Active in Current Session</h3>
+
+            <div className="schemes-list">
+              {activeSchemes.length === 0 && (
+                <p className="settings-empty">No color schemes are active in this session.</p>
+              )}
+              {activeSchemes.map(scheme => (
+                <SchemeItem
+                  key={scheme.name}
+                  scheme={scheme}
+                  isActive={true}
+                  sources={scheme.sources}
+                />
+              ))}
+            </div>
+          </div>
+
+          <div className="settings-section" style={{ marginTop: 16 }}>
+            <h3>Saved Color Schemes</h3>
+
+            <div className="schemes-list">
+              {savedSchemesList.length === 0 && (
+                <p className="settings-empty">No saved color schemes.</p>
+              )}
+              {savedSchemesList.map(scheme => (
+                <SchemeItem
+                  key={scheme.name}
+                  scheme={scheme}
+                  isActive={false}
+                />
+              ))}
+            </div>
           </div>
 
           <div className="settings-row-btns" style={{ marginTop: 12 }}>
             <button className="settings-btn" onClick={() => {
-              setEditingScheme({ name: '', colors: defaultSchemeColors() });
+              setEditingScheme({
+                name: '',
+                originalName: '',
+                colors: defaultSchemeColors(),
+              });
               setPage('editScheme');
             }}>
               + Add Color Scheme
@@ -354,7 +497,7 @@ export default function SettingsModal({ appState, onApplyState, onClose, onHotke
     return (
       <div className="settings-overlay" onClick={onClose}>
         <div className="settings-popup settings-popup-wide" onClick={e => e.stopPropagation()}>
-          <h2 className="settings-title">Edit Color Scheme</h2>
+          <h2 className="settings-title">{editingScheme.originalName ? 'Edit Color Scheme' : 'New Color Scheme'}</h2>
 
           <div className="settings-row">
             <span className="settings-label">Name:</span>
@@ -398,9 +541,38 @@ export default function SettingsModal({ appState, onApplyState, onClose, onHotke
 
           <div className="settings-row-btns" style={{ marginTop: 16 }}>
             <button className="settings-btn" onClick={() => {
-              if (!editingScheme.name.trim()) return;
-              saveColorScheme(editingScheme.name.trim(), editingScheme.colors);
-              refreshSchemes();
+              const originalName = editingScheme.originalName || '';
+              const newName = editingScheme.name.trim();
+              if (!newName) return;
+
+              if (originalName && originalName !== newName) {
+                saveColorScheme(newName, editingScheme.colors);
+                deleteColorScheme(originalName);
+
+                const updates = {};
+
+                if (appState.activeColorScheme?.name === originalName) {
+                  updates.activeColorScheme = {
+                    name: newName,
+                    colors: editingScheme.colors,
+                  };
+                }
+
+                if ((appState.tracks || []).some(track => track.schemeName === originalName)) {
+                  updates.tracks = (appState.tracks || []).map(track =>
+                    track.schemeName === originalName
+                      ? { ...track, schemeName: newName }
+                      : track
+                  );
+                }
+
+                if (Object.keys(updates).length > 0) {
+                  onApplyState(updates);
+                }
+              } else {
+                saveColorScheme(newName, editingScheme.colors);
+              }
+
               setPage('schemes');
             }}>
               Save
