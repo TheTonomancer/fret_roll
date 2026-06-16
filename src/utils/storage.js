@@ -1,11 +1,12 @@
 import { compressToEncodedURIComponent, decompressFromEncodedURIComponent } from 'lz-string';
 import { NUM_BARS, SUBDIVISIONS, BPM } from './constants';
-import { loadCustomPresets, saveCustomPreset } from './audio';
+import { loadCustomPresets } from './audio';
 
 const STORAGE_KEY = 'guitar-roll-sessions';
 const SCHEMES_KEY = 'guitar-roll-color-schemes';
 const CHORDS_KEY = 'guitar-roll-chord-library';
 const AUTOSAVE_KEY = 'guitar-roll-autosave';
+const SESSION_SCHEME_STATE_KEY = 'guitar-roll-session-scheme-state';
 
 // --- Chord library ---
 export function loadChordLibrary() {
@@ -25,6 +26,19 @@ export function loadAutosave() {
 
 export function saveAutosave(state) {
   localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(state));
+}
+
+// --- Current session scheme state ---
+export function loadSessionSchemeState() {
+  try { return JSON.parse(localStorage.getItem(SESSION_SCHEME_STATE_KEY)) || {}; }
+  catch { return {}; }
+}
+
+export function saveSessionSchemeState(sessionScheme, sessionSchemes) {
+  localStorage.setItem(SESSION_SCHEME_STATE_KEY, JSON.stringify({
+    sessionScheme: sessionScheme || null,
+    sessionSchemes: sessionSchemes || {},
+  }));
 }
 
 // --- Session state shape ---
@@ -57,8 +71,8 @@ export function getSessionState(appState) {
     markers: appState.markers,
     metronome: appState.metronome,
     barSubdivisions: appState.barSubdivisions,
-    activeColorScheme: appState.activeColorScheme || null,
-    colorSchemes: listColorSchemes(),
+    globalScheme: appState.sessionScheme || null,
+    sessionSchemes: getSessionSchemes(appState),
     synthPresets: loadCustomPresets(),
     chordLibrary: loadChordLibrary(),
   };
@@ -95,6 +109,40 @@ export function listColorSchemes() {
     const raw = localStorage.getItem(SCHEMES_KEY);
     return raw ? JSON.parse(raw) : {};
   } catch { return {}; }
+}
+
+// Build the session-local scheme map for export/import.
+// This includes every scheme referenced by the current session, but importing
+// these schemes will load them into session memory instead of saving them to
+// the user's permanent color scheme library.
+export function getSessionSchemes(appState) {
+  const allSchemes = listColorSchemes();
+  const sessionSchemes = {};
+
+  const addScheme = (name, fallbackColors) => {
+    if (!name || sessionSchemes[name]) return;
+
+    if (appState.sessionSchemes?.[name]) {
+      sessionSchemes[name] = appState.sessionSchemes[name];
+    } else if (Object.prototype.hasOwnProperty.call(allSchemes, name)) {
+      sessionSchemes[name] = allSchemes[name];
+    } else if (fallbackColors) {
+      sessionSchemes[name] = fallbackColors;
+    }
+  };
+
+  if (appState.sessionScheme?.name) {
+    addScheme(
+      appState.sessionScheme.name,
+      appState.sessionScheme.colors
+    );
+  }
+
+  (appState.tracks || []).forEach(track => {
+    addScheme(track.schemeName);
+  });
+
+  return sessionSchemes;
 }
 
 export function saveColorScheme(name, scheme) {
@@ -164,11 +212,19 @@ export function importFromFile() {
 
 // --- URL compression ---
 export function stateToUrl(state) {
-  const { colorSchemes, ...urlState } = state;
-  // Only include the active color scheme, not all saved schemes
+  const urlState = { ...state };
+  delete urlState.colorSchemes;
+
   if (urlState.activeColorScheme) {
-    urlState.colorSchemes = { [urlState.activeColorScheme.name]: urlState.activeColorScheme.colors };
+    urlState.globalScheme = urlState.activeColorScheme;
+    delete urlState.activeColorScheme;
   }
+
+  if (urlState.sessionScheme && !urlState.globalScheme) {
+    urlState.globalScheme = urlState.sessionScheme;
+  }
+  delete urlState.sessionScheme;
+
   const json = JSON.stringify(urlState);
   const compressed = compressToEncodedURIComponent(json);
   return window.location.origin + window.location.pathname + '#s=' + compressed;
