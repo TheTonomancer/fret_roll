@@ -11,6 +11,7 @@ export default function TrackStrip({
   onAddTrack, onDeleteTrack, onDuplicateTrack, onReorderTracks, onRenameTrack,
   onToggleVisible, onSetBgOpacity, onSetTrackScheme,
   onLoadAudio, onRemoveAudio,
+  sessionSchemes = {},
 }) {
   const [editingId, setEditingId] = useState(null);
   const [editName, setEditName] = useState('');
@@ -37,7 +38,10 @@ export default function TrackStrip({
   // eslint-disable-next-line no-unused-vars
   const _v = schemesVersion;
   const schemes = listColorSchemes();
-  const schemeNames = Object.keys(schemes);
+  const schemeNames = Array.from(new Set([
+    ...Object.keys(schemes),
+    ...Object.keys(sessionSchemes || {}),
+  ]));
 
   return (
     <div className={`track-panel ${expanded ? 'expanded' : ''}`}>
