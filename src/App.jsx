@@ -8,7 +8,7 @@ import { loadAudioFile, computeWaveformPeaks } from './utils/audioFile';
 import { ensureReady as ensureStretchReady, createStretchNode, setStretchTempo } from './utils/rubberbandStretch';
 import { putAudioFile, getAudioFile, deleteAudioFile } from './utils/audioStore';
 import { parseMidi, midiToGuitarNotes } from './utils/midiImport';
-import { stateFromUrl, saveColorScheme, saveChordLibrary, getSessionState, saveAutosave, loadAutosave, listColorSchemes } from './utils/storage';
+import { stateFromUrl, saveChordLibrary, getSessionState, saveAutosave, loadAutosave, listColorSchemes, loadSessionSchemeState, saveSessionSchemeState } from './utils/storage';
 import { loadHotkeys, matchesHotkey, formatHotkey, REFERENCE_ACTIONS } from './utils/hotkeys';
 import { getMidiNote, closestComboForPitch, getComboForPosition } from './utils/pitchMap';
 import { NUM_STRINGS, NUM_FRETS } from './utils/constants';
@@ -258,7 +258,8 @@ function App() {
   const [instrumentList, setInstrumentList] = useState(getAllInstruments);
   const [verticalScroll, setVerticalScroll] = useState(0);
   const [synesthesia, setSynesthesia] = useState([]); // [{ note: 'C', color: '#ff0000' }, ...]
-  const [activeColorScheme, setActiveColorScheme] = useState(null); // { name, colors }
+  const [sessionScheme, setSessionScheme] = useState(() => loadSessionSchemeState().sessionScheme || null);
+  const [sessionSchemes, setSessionSchemes] = useState(() => loadSessionSchemeState().sessionSchemes || {});
   const [barSubdivisions, setBarSubdivisions] = useState(defaultBarSubdivisions);
   const barSubsRef = useRef(barSubdivisions);
   barSubsRef.current = barSubdivisions;
@@ -266,6 +267,11 @@ function App() {
   const [loopStart, setLoopStart] = useState(0);
   const [loopEnd, setLoopEnd] = useState(totalColumns(defaultBarSubdivisions()));
   const playingRef = useRef(false);
+
+  useEffect(() => {
+    saveSessionSchemeState(sessionScheme, sessionSchemes);
+  }, [sessionScheme, sessionSchemes]);
+
   const bpmRef = useRef(bpm);
   const metronomeRef = useRef(metronome);
   const loopRef = useRef(false);
@@ -314,9 +320,9 @@ function App() {
   const synesthesiaMap = {};
   synesthesia.forEach(s => { if (s.note) synesthesiaMap[s.note] = s.color; });
 
-  // Track schemes are stored by name in localStorage; load active track's scheme map
+  // Track schemes are resolved from session-local schemes first, then saved schemes.
   const activeTrackScheme = activeTrack?.schemeName
-    ? (listColorSchemes()[activeTrack.schemeName] || null)
+    ? (sessionSchemes?.[activeTrack.schemeName] || listColorSchemes()[activeTrack.schemeName] || null)
     : null;
 
   const getNoteColor = useCallback((stringIndex, fret) => {
@@ -325,7 +331,7 @@ function App() {
     if (activeTrackScheme && activeTrackScheme[letter]) return activeTrackScheme[letter];
     if (synesthesiaMap[letter]) return synesthesiaMap[letter];
     return stringColors[stringIndex];
-  }, [stringColors, synesthesia, activeTrackScheme]);
+  }, [stringColors, synesthesia, activeTrackScheme, sessionSchemes]);
 
   // Apply partial state from settings/load/URL
   const applyState = useCallback((data) => {
@@ -369,15 +375,26 @@ function App() {
     if (data.subdivisions !== undefined) setSubdivisions(data.subdivisions);
     if (data.markers !== undefined) setMarkers(data.markers);
     if (data.metronome !== undefined) setMetronome(data.metronome);
-    if (data.activeColorScheme !== undefined) setActiveColorScheme(data.activeColorScheme);
+    if (data.sessionSchemes !== undefined) {
+      setSessionSchemes(data.sessionSchemes || {});
+    } else if (data.colorSchemes !== undefined) {
+      setSessionSchemes(data.colorSchemes || {});
+    }
+    const globalScheme = data.globalScheme !== undefined
+      ? data.globalScheme
+      : data.sessionScheme !== undefined
+        ? data.sessionScheme
+        : data.activeColorScheme;
+
+    if (globalScheme !== undefined) {
+      setSessionScheme(globalScheme);
+      if (globalScheme?.name && globalScheme?.colors) {
+        setSessionSchemes(prev => ({ ...prev, [globalScheme.name]: globalScheme.colors }));
+      }
+    }
     if (data.barSubdivisions !== undefined) setBarSubdivisions(data.barSubdivisions);
     if (data.timeSignature !== undefined) setTimeSignature(data.timeSignature);
     if (data.projectName !== undefined) setProjectName(data.projectName);
-    if (data.colorSchemes) {
-      Object.entries(data.colorSchemes).forEach(([name, scheme]) => {
-        saveColorScheme(name, scheme);
-      });
-    }
     if (data.synthPresets) {
       Object.entries(data.synthPresets).forEach(([id, preset]) => {
         saveCustomPreset(id, preset);
@@ -409,7 +426,14 @@ function App() {
       window.history.replaceState(null, '', window.location.pathname);
     } else {
       const auto = loadAutosave();
-      if (auto) applyState(auto);
+      if (auto) {
+        const sessionSchemeState = loadSessionSchemeState();
+        applyState({
+          ...auto,
+          sessionScheme: sessionSchemeState.sessionScheme || null,
+          sessionSchemes: sessionSchemeState.sessionSchemes || {},
+        });
+      }
     }
   }, []);
 
@@ -441,13 +465,13 @@ function App() {
       const state = getSessionState({
         tracks: tracksRef.current,
         bpm, loop, loopStart, loopEnd,
-        stringColors, synesthesia, activeColorScheme,
+        stringColors, synesthesia, sessionScheme, sessionSchemes,
         projectName, subdivisions, metronome, barSubdivisions, timeSignature, markers,
       });
       saveAutosave(state);
     }, 30000);
     return () => clearInterval(interval);
-  }, [autoSave, bpm, loop, loopStart, loopEnd, stringColors, synesthesia, activeColorScheme, projectName, subdivisions, metronome, barSubdivisions, timeSignature, markers]);
+  }, [autoSave, bpm, loop, loopStart, loopEnd, stringColors, synesthesia, sessionScheme, sessionSchemes, projectName, subdivisions, metronome, barSubdivisions, timeSignature, markers]);
 
   const totalBeats = totalColumns(barSubdivisions);
   const handlePlayRef = useRef(null);
@@ -1420,7 +1444,7 @@ function App() {
               tracks: [track],
               bpm: 120, loop: false, loopStart: 0, loopEnd: totalColumns(defaultBarSubdivisions()),
               stringColors: ['#ffffff','#ffffff','#ffffff','#ffffff','#ffffff','#ffffff'],
-              synesthesia: [], activeColorScheme: null,
+              synesthesia: [], sessionScheme: null, sessionSchemes: {},
               subdivisions: 4, markers: [], metronome: false,
               barSubdivisions: defaultBarSubdivisions(),
               timeSignature: [4, 4], projectName: 'Untitled',
@@ -1592,6 +1616,7 @@ function App() {
         onToggleVisible={handleToggleVisible}
         onSetBgOpacity={handleSetBgOpacity}
         onSetTrackScheme={handleSetTrackScheme}
+        sessionSchemes={sessionSchemes}
       />
       <div className="status-bar">
         <span style={{ color: (freeMode || fingeringMode || machineGunMode) ? '#e67e22' : '#888' }}>
@@ -1887,7 +1912,7 @@ function App() {
         <SettingsModal
           appState={{
             tracks, bpm, loop, loopStart, loopEnd,
-            stringColors, synesthesia, activeColorScheme,
+            stringColors, synesthesia, sessionScheme, sessionSchemes,
             projectName, subdivisions, metronome, barSubdivisions, timeSignature, markers,
           }}
           onApplyState={applyState}
