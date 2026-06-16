@@ -1981,6 +1981,24 @@ input[type="number"] {
   word-break: break-word;
 }
 
+.scheme-active-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: #1f6f45;
+  color: #b7f7ce;
+  font-size: 10px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+
+.scheme-source {
+  color: #777;
+  font-size: 11px;
+  margin-bottom: 8px;
+}
+
 .scheme-row {
   display: flex;
   align-items: center;
@@ -2112,6 +2130,16 @@ input[type="number"] {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+}
+
+.confirm-actions.vertical {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.confirm-actions.vertical .settings-btn {
+  width: 100%;
+  white-space: normal;
 }
 
 .confirm-danger {
