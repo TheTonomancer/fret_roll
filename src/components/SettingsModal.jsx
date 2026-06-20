@@ -104,7 +104,7 @@ function getSessionSchemes(appState, savedSchemes) {
   });
 }
 
-export default function SettingsModal({ appState, onApplyState, onClose, onHotkeysChange, hoverPreview, onHoverPreviewChange, tupletLines, onTupletLinesChange, autoScroll, onAutoScrollChange, hoverPill, onHoverPillChange, autoSave, onAutoSaveChange, showTimelineVerticalZoomButtons, onShowTimelineVerticalZoomButtonsChange }) {
+export default function SettingsModal({ appState, onApplyState, onClose, onHotkeysChange, hoverPreview, onHoverPreviewChange, tupletLines, onTupletLinesChange, autoScroll, onAutoScrollChange, hoverPill, onHoverPillChange, autoSave, onAutoSaveChange, showTimelineVerticalZoomButtons, onShowTimelineVerticalZoomButtonsChange, fretboardAutoForward, onFretboardAutoForwardChange, fretboardAutoForwardExcludeAdjacent, onFretboardAutoForwardExcludeAdjacentChange }) {
   const [page, setPage] = useState('main'); // main, schemes, editScheme, sessions, hotkeys
   const [editingScheme, setEditingScheme] = useState(null); // { name, originalName, colors }
   const [sessions, setSessions] = useState(listSessions);
@@ -366,6 +366,31 @@ export default function SettingsModal({ appState, onApplyState, onClose, onHotke
           </div>
 
           <div className="settings-section">
+            <h3>Fretboard Input</h3>
+            <div className="settings-row">
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#ccc', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={fretboardAutoForward ?? false}
+                  onChange={(e) => onFretboardAutoForwardChange(e.target.checked)}
+                />
+                Auto-forward after note input/duration change
+              </label>
+            </div>
+            <div className="settings-row" style={{ marginTop: 6 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: fretboardAutoForward ? '#ccc' : '#888', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={fretboardAutoForwardExcludeAdjacent ?? true}
+                  onChange={(e) => onFretboardAutoForwardExcludeAdjacentChange(e.target.checked)}
+                  disabled={!fretboardAutoForward}
+                />
+                Exclude adjacent mode from auto-forward
+              </label>
+            </div>
+          </div>
+
+          <div className="settings-section">
             <h3>Fretboard Hover Pill</h3>
             {[
               { key: 'fretboard', label: 'Show on fretboard hover' },
@@ -386,17 +411,17 @@ export default function SettingsModal({ appState, onApplyState, onClose, onHotke
 
           <div className="settings-section">
             <h3>Timeline</h3>
-            <div className="settings-row">
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#ccc', cursor: 'pointer' }}>
-                <input
-                  type="checkbox"
-                  checked={showTimelineVerticalZoomButtons !== false}
-                  onChange={(e) => onShowTimelineVerticalZoomButtonsChange(e.target.checked)}
-                />
-                Dock vertical zoom buttons (top-right)
-              </label>
+              <div className="settings-row">
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#ccc', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={showTimelineVerticalZoomButtons !== false}
+                    onChange={(e) => onShowTimelineVerticalZoomButtonsChange(e.target.checked)}
+                  />
+                  Dock vertical zoom buttons (top-right)
+                </label>
+              </div>
             </div>
-          </div>
 
           <div className="settings-section">
             <h3>Keyboard Shortcuts</h3>
