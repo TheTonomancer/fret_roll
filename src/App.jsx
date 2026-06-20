@@ -3,7 +3,7 @@ import Fretboard from './components/Fretboard';
 import Timeline from './components/Timeline';
 import { playNote, playNoteAtTime, playClickAtTime, getAudioContext, getMasterOut, getNoteName, INSTRUMENTS, getAllInstruments, setInstrument, getInstrument, saveCustomPreset } from './utils/audio';
 import { NUM_BARS, SUBDIVISIONS, BPM as DEFAULT_BPM } from './utils/constants';
-import { defaultBarSubdivisions, totalColumns, beatToBar, beatToTime, timeToBeat, colDurationAtBeat, remapNotes, barStartBeats } from './utils/barLayout';
+import { defaultBarSubdivisions, totalColumns, beatToBar, beatToTime, colDurationAtBeat, remapNotes, barStartBeats } from './utils/barLayout';
 import { loadAudioFile, computeWaveformPeaks } from './utils/audioFile';
 import { ensureReady as ensureStretchReady, createStretchNode, setStretchTempo } from './utils/rubberbandStretch';
 import { putAudioFile, getAudioFile, deleteAudioFile } from './utils/audioStore';
@@ -223,6 +223,18 @@ function App() {
       return { fretboard: true, pianoRoll: true, ...saved };
     } catch { return { fretboard: true, pianoRoll: true }; }
   });
+  const [fretboardAutoForward, setFretboardAutoForward] = useState(() => {
+    try {
+      const saved = localStorage.getItem('guitar-roll-fretboard-auto-forward');
+      return saved === null ? false : saved === 'true';
+    } catch { return false; }
+  });
+  const [fretboardAutoForwardExcludeAdjacent, setFretboardAutoForwardExcludeAdjacent] = useState(() => {
+    try {
+      const saved = localStorage.getItem('guitar-roll-fretboard-auto-forward-exclude-adjacent');
+      return saved === null ? true : saved === 'true';
+    } catch { return true; }
+  });
   const [fingeringMode, setFingeringMode] = useState(false);
   const fingeringModeRef = useRef(false);
   const [timelineZoom, setTimelineZoom] = useState(1);
@@ -283,6 +295,7 @@ function App() {
   const [position, setPosition] = useState(() => 0);
   const positionRef = useRef(position);
   positionRef.current = position;
+  const [playheadPreview, setPlayheadPreview] = useState(false);
   const [positionMode, setPositionMode] = useState(false);
   const positionModeRef = useRef(false);
   positionModeRef.current = positionMode;
@@ -829,8 +842,8 @@ function App() {
     };
   }, [totalBeats, undo, redo, setNotes]);
 
-  const handleFretClick = useCallback((stringIndex, fret) => {
-    const beat = Math.round(selectedBeat * 10000) / 10000; // avoid float drift
+  const handleFretClick = useCallback((stringIndex, fret, stayInPlace = false) => {
+    const beat = Math.round(selectedBeat * 10000) / 10000;
     setNotes(prev => {
       const exactMatch = prev.findIndex(
         n => n.stringIndex === stringIndex && n.fret === fret && Math.abs(n.beat - beat) < 0.001
@@ -843,9 +856,13 @@ function App() {
       );
       return [...filtered, { stringIndex, fret, beat, duration: noteDuration, velocity: defaultVelocity }];
     });
-  }, [selectedBeat, noteDuration, defaultVelocity]);
-
-  const handleAdjacentClick = useCallback((stringIndex, fret) => {
+    if (fretboardAutoForward !== stayInPlace) {
+      const noteEnd = Math.round((selectedBeat + noteDuration) * 10000) / 10000;
+      const nextBeat = Math.ceil(noteEnd / snapUnit) * snapUnit;
+      setSelectedBeat(Math.min(nextBeat, totalBeats - 1));
+    }
+  }, [selectedBeat, noteDuration, snapUnit, totalBeats, defaultVelocity, fretboardAutoForward]);
+  const handleAdjacentClick = useCallback((stringIndex, fret, stayInPlace = false) => {
     const beat = Math.round(selectedBeat * 10000) / 10000;
     setNotes(prev => {
       const exactMatch = prev.findIndex(
@@ -856,7 +873,12 @@ function App() {
       }
       return [...prev, { stringIndex, fret, beat, duration: noteDuration, velocity: defaultVelocity }];
     });
-  }, [selectedBeat, noteDuration]);
+    if (fretboardAutoForward && stayInPlace === fretboardAutoForwardExcludeAdjacent) {
+      const noteEnd = Math.round((selectedBeat + noteDuration) * 10000) / 10000;
+      const nextBeat = Math.ceil(noteEnd / snapUnit) * snapUnit;
+      setSelectedBeat(Math.min(nextBeat, totalBeats - 1));
+    }
+  }, [selectedBeat, noteDuration, snapUnit, totalBeats, defaultVelocity, fretboardAutoForward, fretboardAutoForwardExcludeAdjacent]);
 
   const handleMoveNote = useCallback((fromString, fromFret, toString, toFret) => {
     setNotes(prev => {
@@ -1724,8 +1746,12 @@ function App() {
           timelineZoom={timelineZoom}
           barSubdivisions={barSubdivisions}
           position={position}
-          setPosition={setPosition}          
-        />
+          setPosition={setPosition}
+          playheadPreview={playheadPreview}
+          setPlayheadPreview={setPlayheadPreview}
+          setSelectedBeat={setSelectedBeat}
+          fretboardAutoForward={fretboardAutoForward}
+         />
         <Timeline
           notes={notes}
           backgroundNotes={tracks.filter(t => t.id !== activeTrackId && t.visible !== false).flatMap(t =>
@@ -1755,6 +1781,8 @@ function App() {
           selectedBeat={selectedBeat}
           setSelectedBeat={setSelectedBeat}
           playing={playing}
+          playheadPreview={playheadPreview}
+          setPlayheadPreview={setPlayheadPreview}
           onDeleteNote={handleDeleteNote}
           loopStart={loopStart}
           loopEnd={loopEnd}
@@ -1927,6 +1955,10 @@ function App() {
           onHoverPillChange={(v) => { setHoverPill(v); localStorage.setItem('guitar-roll-hover-pill', JSON.stringify(v)); }}
           autoSave={autoSave}
           onAutoSaveChange={(v) => { setAutoSave(v); localStorage.setItem('guitar-roll-auto-save', JSON.stringify(v)); }}
+          fretboardAutoForward={fretboardAutoForward}
+          onFretboardAutoForwardChange={(v) => { setFretboardAutoForward(v); localStorage.setItem('guitar-roll-fretboard-auto-forward', String(v)); }}
+          fretboardAutoForwardExcludeAdjacent={fretboardAutoForwardExcludeAdjacent}
+          onFretboardAutoForwardExcludeAdjacentChange={(v) => { setFretboardAutoForwardExcludeAdjacent(v); localStorage.setItem('guitar-roll-fretboard-auto-forward-exclude-adjacent', String(v)); }}
           showTimelineVerticalZoomButtons={showTimelineVerticalZoomButtons}
           onShowTimelineVerticalZoomButtonsChange={(v) => {
             setShowTimelineVerticalZoomButtons(v);
