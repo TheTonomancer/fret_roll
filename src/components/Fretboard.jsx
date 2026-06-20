@@ -17,7 +17,7 @@ const TOTAL_CELLS = NUM_FRETS + 1;
 
 
 
-export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, onDurationChange, onBeatChange, saveSnapshot, commitDrag, freeMode = false, totalBeats, activeNotes = [], backgroundActiveNotes = [], playingNotes = [], stringColors, getNoteColor, hoveredNote, setHoveredNote, hotkeys, hoverPreview = false, hoverVolume = 0.3, snapUnit = 1, fretboardZoom = 1, setFretboardZoom, voicingPreview, fingeringMode = false, onExitFingeringMode, onDeleteNote, notes = [], selectedBeat, selectedNotes, setSelectedNotes, autoScroll, hoverPill, timelineBodyRef, timelineZoom = 1, barSubdivisions = 4, position = 0, setPosition}) {
+export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, onDurationChange, onBeatChange, saveSnapshot, commitDrag, freeMode = false, totalBeats, activeNotes = [], backgroundActiveNotes = [], playingNotes = [], stringColors, getNoteColor, hoveredNote, setHoveredNote, hotkeys, hoverPreview = false, hoverVolume = 0.3, snapUnit = 1, fretboardZoom = 1, setFretboardZoom, voicingPreview, fingeringMode = false, onExitFingeringMode, onDeleteNote, notes = [], selectedBeat, selectedNotes, setSelectedNotes, autoScroll, hoverPill, timelineBodyRef, timelineZoom = 1, barSubdivisions = 4, position = 0, setPosition, setPlayheadPreview, setSelectedBeat, fretboardAutoForward = false }) {
   const FRET_HEIGHT = BASE_FRET_HEIGHT * fretboardZoom;
   const GRID_HEIGHT = TOTAL_CELLS * FRET_HEIGHT;
   const cellTopPx = (cell) => cell * FRET_HEIGHT;
@@ -191,8 +191,8 @@ export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, on
       window.addEventListener('mousemove', handleMarqueeMove);
       window.addEventListener('mouseup', handleMarqueeUp);
       e.preventDefault();
-      return;
-    }
+       return;
+     }
 
     if (durationMode) {
       if (activeNote) {
@@ -203,6 +203,7 @@ export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, on
           startDuration: activeNote.duration || 1,
           noteBeat: activeNote.beat,
           startScrollX: timelineBodyRef?.current?.scrollLeft ?? 0,
+          ctrlKey: e.ctrlKey || e.metaKey,
         };
         setDurationDrag({
           stringIndex: result.stringIndex,
@@ -212,6 +213,7 @@ export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, on
 
         saveSnapshot();
         const isFree = freeMode;
+
         let lastMouseX = e.clientX;
         const runDurationMove = () => {
           const d = durationDragRef.current;
@@ -225,8 +227,8 @@ export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, on
             ? Math.max(0.1, Math.min(totalBeats - d.noteBeat, rawDuration))
             : Math.max(snap, Math.min(totalBeats - d.noteBeat, Math.round(rawDuration / snap) * snap));
           setDurationDrag({ stringIndex: d.stringIndex, fret: d.fret, duration: newDuration });
+          d.duration = newDuration;
           onDurationChange(d.stringIndex, d.fret, newDuration);
-          // Drive auto-pan from the note's tail position rather than the cursor
           const tail = beatToClientX(d.noteBeat + newDuration);
           if (tail) timelineAutoPan.update(tail.clientX, tail.safeY);
         };
@@ -236,9 +238,19 @@ export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, on
         };
         const handleDurationUp = () => {
           timelineAutoPan.stop();
+          const dur = durationDragRef.current?.duration;
+          const ctrlKeyHeld = durationDragRef.current?.ctrlKey ?? false;
+          const original = activeNote?.duration || 1;
+          const finalDuration = dur ?? original;
           commitDrag();
           durationDragRef.current = null;
           setDurationDrag(null);
+          if (activeNote && setSelectedBeat && (fretboardAutoForward !== ctrlKeyHeld)) {
+            const noteEnd = Math.round((activeNote.beat + finalDuration) * 10000) / 10000;
+            const nextBeat = Math.ceil(noteEnd / snapUnit) * snapUnit;
+            const clamped = Math.min(nextBeat, totalBeats - 1);
+            setSelectedBeat(clamped);
+          }
           window.removeEventListener('mousemove', handleDurationMove);
           window.removeEventListener('mouseup', handleDurationUp);
         };
@@ -377,9 +389,9 @@ export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, on
         return;
       }
       if (adjacentMode) {
-        onAdjacentClick(result.stringIndex, result.fret);
+        onAdjacentClick(result.stringIndex, result.fret, e.ctrlKey || e.metaKey);
       } else {
-        onNoteClick(result.stringIndex, result.fret);
+        onNoteClick(result.stringIndex, result.fret, e.ctrlKey || e.metaKey);
       }
       const fret = result.fret;
       const posEnd = Math.min(position + 4, NUM_FRETS);
@@ -393,7 +405,7 @@ export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, on
         setPosition(newPos);
       }
     }
-  }, [getStringAndFret, onNoteClick, onAdjacentClick, onMoveNote, durationMode, adjacentMode, moveMode, fingeringMode, notes, selectedBeat, setSelectedNotes, position, setPosition]);
+  }, [getStringAndFret, onNoteClick, onAdjacentClick, onMoveNote, durationMode, adjacentMode, moveMode, fingeringMode, notes, selectedBeat, setSelectedNotes, position, setPosition, fretboardAutoForward]);
 
 
   // Auto-scroll fretboard to show hovered note (from piano roll — only when local hover is null)
@@ -477,8 +489,20 @@ export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, on
           cursor: (durationMode || moveMode) ? 'ew-resize' : adjacentMode ? 'cell' : undefined,
         }}
         onMouseMove={handleMouseMove}
-        onMouseDown={handleMouseDown}
-        onMouseUp={handleMouseUp}
+        onMouseDown={(e) => {
+          if (e.button !== 0) return;
+          if (!durationMode && !moveMode && !adjacentMode && !fingeringMode && setPlayheadPreview && !playing) {
+            setPlayheadPreview(true);
+          }
+          handleMouseDown(e);
+        }}
+        onMouseUp={(e) => {
+          if (e.button !== 0) return;
+          if (setPlayheadPreview) {
+            setPlayheadPreview(false);
+          }
+          handleMouseUp(e);
+        }}
         onContextMenu={(e) => {
           e.preventDefault();
           if (!onDeleteNote) return;
