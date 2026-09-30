@@ -510,6 +510,7 @@ function App() {
   const totalBeats = totalColumns(barSubdivisions);
   const handlePlayRef = useRef(null);
   const handleSetSubdivisionsRef = useRef(null);
+  const handleToggleSoloRef = useRef(null);
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.target.tagName === 'INPUT') return;
@@ -793,6 +794,12 @@ function App() {
             selectedNotesRef.current.has(i) ? { ...n, bend: Math.max(0, (n.bend || 0) - 0.5) } : n
           ));
         }
+      }
+      /* Solo: hotkey solos only current track. If there's only 1
+      soloed track, using the hotkey on it un-solos that track */
+      if (matchesHotkey(e, hk.soloTrack)) {
+        e.preventDefault();
+        if (handleToggleSoloRef.current) handleToggleSoloRef.current();
       }
       if (matchesHotkey(e, hk.toggleSlide)) {
         if (selectedNotesRef.current.size > 0) {
@@ -1380,6 +1387,21 @@ function App() {
       t.id === trackId ? { ...t, solo: !t.solo } : t
     ));
   }, [setTracksTracked]);
+
+  const handleToggleSoloActiveTrack = useCallback(() => {
+    setTracksTracked(prev => {
+      const target = prev.find(t => t.id === activeTrackIdRef.current);
+      if (!target) return prev;
+      // Unsolo when this track is already the only soloed track.
+      if (target.solo && prev.every(t => !t.solo || t.id === target.id)) {
+        return prev.map(t => (t.solo ? { ...t, solo: false } : t));
+      }
+      // Otherwise solo exclusively this track.
+      return prev.map(t => (t.id === target.id ? { ...t, solo: true } : (t.solo ? { ...t, solo: false } : t)));
+    });
+  }, [setTracksTracked]);
+
+  handleToggleSoloRef.current = handleToggleSoloActiveTrack;
 
   const handleSetTrackVolume = useCallback((trackId, volume) => {
     setTracksTracked(prev => prev.map(t =>

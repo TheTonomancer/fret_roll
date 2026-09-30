@@ -27,6 +27,7 @@ const DEFAULT_HOTKEYS = {
   bendUp: { label: 'Bend Up', description: 'Increase bend on selected notes', key: 'ArrowUp', modifiers: { shift: true } },
   bendDown: { label: 'Bend Down', description: 'Decrease bend on selected notes', key: 'ArrowDown', modifiers: { shift: true } },
   toggleSlide: { label: 'Toggle Slide', description: 'Toggle slide to next note on selected', key: 's', modifiers: { shift: true } },
+  soloTrack: { label: 'Solo Track', description: 'Solo the selected track (press again to unsolo)', key: 's' },
   prevMarker: { label: 'Previous Marker', description: 'Jump to previous marker', key: 'PageUp' },
   nextMarker: { label: 'Next Marker', description: 'Jump to next marker', key: 'PageDown' },
   voiceLeading: { label: 'Voice Leading', description: 'Open voice leading assistant for selected chords', key: 'v' },
@@ -150,7 +151,7 @@ export function formatHotkey(hotkey) {
 // Editable hotkey IDs (ones users can change)
 export const EDITABLE_HOTKEYS = [
   'noteJump', 'freeMode', 'durationMode', 'moveMode', 'adjacentMode',
-  'deleteNotes', 'toggleGhost', 'bendUp', 'bendDown', 'toggleSlide', 'voiceLeading',
+  'deleteNotes', 'toggleGhost', 'bendUp', 'bendDown', 'toggleSlide', 'soloTrack', 'voiceLeading',
   'prevMarker', 'nextMarker', 'playStop', 'returnToStart', 'prevBeat', 'nextBeat',
   'jumpPrevNote', 'jumpNextNote',
   'zoomIn', 'zoomOut', 'zoomWheel', 'verticalZoomIn', 'verticalZoomOut', 'verticalZoomWheel', 'velocityWheel',
