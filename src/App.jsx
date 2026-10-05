@@ -819,11 +819,11 @@ function App() {
         e.preventDefault();
         setShowVoiceLeading(true);
       }
-      // Fingering: shift selected notes to adjacent string, same pitch (only in fingering mode)
-      if (fingeringModeRef.current && (matchesHotkey(e, hk.fingerUp) || matchesHotkey(e, hk.fingerDown))) {
+      // Fingering: shift selected notes to an adjacent string, same pitch (only in fingering mode)
+      if (fingeringModeRef.current && (matchesHotkey(e, hk.stringUp) || matchesHotkey(e, hk.stringDown))) {
         if (selectedNotesRef.current.size > 0) {
           e.preventDefault();
-          const dir = matchesHotkey(e, hk.fingerUp) ? -1 : 1;
+          const dir = matchesHotkey(e, hk.stringUp) ? 1 : -1;
           const MAX_FRET_SPAN = 4;
           setNotes(prev => {
             // Collect selected notes with their indices
