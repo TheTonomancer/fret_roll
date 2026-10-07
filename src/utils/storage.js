@@ -53,6 +53,8 @@ function defaultSession() {
     stringColors: ['#ffffff', '#ffffff', '#ffffff', '#ffffff', '#ffffff', '#ffffff'],
     synesthesia: [],
     subdivisions: 4,
+    rhythmUnit: 'beat',
+    rhythmMult: 1,
     metronome: false,
     barSubdivisions: Array(NUM_BARS).fill(SUBDIVISIONS),
   };
@@ -70,6 +72,8 @@ export function getSessionState(appState) {
     stringColors: appState.stringColors,
     synesthesia: appState.synesthesia,
     subdivisions: appState.subdivisions,
+    rhythmUnit: appState.rhythmUnit,
+    rhythmMult: appState.rhythmMult,
     markers: appState.markers,
     metronome: appState.metronome,
     barSubdivisions: appState.barSubdivisions,
