@@ -37,6 +37,8 @@ export default function Timeline({
   setNoteDuration,
   snapUnit = 1,
   subdivisions = 1,
+  rhythmMult = 1,
+  rhythmUnit = 'beat',
   hotkeys,
   hoverPreviewPiano = false,
   hoverPreviewNotes = false,

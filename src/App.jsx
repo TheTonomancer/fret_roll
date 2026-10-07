@@ -166,16 +166,67 @@ function App() {
   const timelineBodyRef = useRef(null);
   const [selectedBeat, setSelectedBeat] = useState(0);
   const [subdivisions, setSubdivisions] = useState(4); // how many subdivisions per beat
-  const snapUnit = 1 / subdivisions; // smallest grid step
-  const [noteDuration, setNoteDuration] = useState(snapUnit);
-  const noteDurationRef = useRef(noteDuration);
-  noteDurationRef.current = noteDuration;
+  const [rhythmUnit, setRhythmUnit] = useState('beat'); // 'beat' | 'bar'
+  const [rhythmMult, setRhythmMult] = useState(1); // 1-32
+  const [xHeld, setXHeld] = useState(false);
+  const xHeldRef = useRef(false); // ref for synchronous X key access
+  // Position-system-style rhythm entry: buffer accumulates digits on keydown,
+  // commits on keyup (all keys released). Second digit allowed only if
+  // firstDigit * 10 <= max (e.g. subdiv max 32 → first digit 1-3 can extend;
+  // mult max 32 → first digit 1-3 can extend).
+  const rhythmBufRef = useRef({ kind: null, str: '' });
+  const rhythmKeysDownRef = useRef(new Set());
+  const rhythmPendingRef = useRef(null);
+  const [rhythmLiveValue, setRhythmLiveValue] = useState(null);
+  const [rhythmLiveKind, setRhythmLiveKind] = useState(null);
+  const RHYTHM_MAX_DIV = 32;
+  const RHYTHM_MAX_MULT = 32;
+  const RHYTHM_PENDING_WINDOW = 200;
+  // Whether changing the subdivision (÷) resets the multiplier (×) to 1.
+  const [resetMultOnSubdiv, setResetMultOnSubdiv] = useState(() => {
+    try {
+      const saved = localStorage.getItem('guitar-roll-reset-mult-on-subdiv');
+      return saved === null ? true : saved === 'true';
+    } catch { return true; }
+  });
+  const resetMultOnSubdivRef = useRef(resetMultOnSubdiv);
+  resetMultOnSubdivRef.current = resetMultOnSubdiv;
+  useEffect(() => {
+    try { localStorage.setItem('guitar-roll-reset-mult-on-subdiv', String(resetMultOnSubdiv)); } catch {}
+  }, [resetMultOnSubdiv]);
+  // Whether changing ÷ or × updates the duration of selected notes.
+  const [rhythmAltersSelected, setRhythmAltersSelected] = useState(() => {
+    try {
+      const saved = localStorage.getItem('guitar-roll-rhythm-alters-selected');
+      return saved === null ? true : saved === 'true';
+    } catch { return true; }
+  });
+  const rhythmAltersSelectedRef = useRef(rhythmAltersSelected);
+  rhythmAltersSelectedRef.current = rhythmAltersSelected;
+  useEffect(() => {
+    try { localStorage.setItem('guitar-roll-rhythm-alters-selected', String(rhythmAltersSelected)); } catch {}
+  }, [rhythmAltersSelected]);
+  const [timeSignature, setTimeSignature] = useState([4, 4]); // [numerator, denominator]
+  const unitBeats = rhythmUnit === 'bar' ? (timeSignature[0] || 4) : 1;
+  const baseSubdivBeats = unitBeats / subdivisions;
+  const effectiveNoteLength = baseSubdivBeats * rhythmMult;
+  const snapUnit = baseSubdivBeats; // grid snaps to base subdivision (not multiplied length)
+  const [noteDuration, setNoteDuration] = useState(effectiveNoteLength);
+  const noteDurationRef = useRef(effectiveNoteLength);
   const snapUnitRef = useRef(snapUnit);
-  snapUnitRef.current = snapUnit;
+  
+  // Keep refs in sync with derived values
+  useEffect(() => { noteDurationRef.current = effectiveNoteLength; }, [effectiveNoteLength]);
+  useEffect(() => { snapUnitRef.current = snapUnit; }, [snapUnit]);
+  
+  // Sync noteDuration state when effectiveNoteLength changes (e.g. rhythmUnit, rhythmMult, timeSignature)
+  // Use epsilon to avoid unnecessary updates that could cause render loops
+  useEffect(() => {
+    setNoteDuration(prev => Math.abs(prev - effectiveNoteLength) > 1e-6 ? effectiveNoteLength : prev);
+  }, [effectiveNoteLength]);
   const [selectedNotes, setSelectedNotes] = useState(new Set());
   const selectedNotesRef = useRef(selectedNotes);
   selectedNotesRef.current = selectedNotes;
-  const [timeSignature, setTimeSignature] = useState([4, 4]); // [numerator, denominator]
   const [bpm, setBpm] = useState(DEFAULT_BPM);
   const [swing, setSwing] = useState(50);
   const swingRef = useRef(swing);
@@ -278,6 +329,8 @@ function App() {
   const [showCheatSheet, setShowCheatSheet] = useState(false);
   const [showSubdivDial, setShowSubdivDial] = useState(false);
   const subdivDialRef = useRef(null);
+  const [showMultDial, setShowMultDial] = useState(false);
+  const multDialRef = useRef(null);
   const [showSynthEditor, setShowSynthEditor] = useState(false);
   const [chordPreview, setChordPreview] = useState(null);
   const [chordPaletteOpen, setChordPaletteOpen] = useState(false);
@@ -405,8 +458,11 @@ function App() {
     if (data.synesthesia !== undefined) setSynesthesia(data.synesthesia);
     if (data.subdivisions !== undefined) {
       setSubdivisions(data.subdivisions);
-      setNoteDuration(1 / data.subdivisions);
+      setRhythmMult(1);
+      // noteDuration is now derived from effectiveNoteLength
     }
+    if (data.rhythmUnit !== undefined) setRhythmUnit(data.rhythmUnit);
+    if (data.rhythmMult !== undefined) setRhythmMult(data.rhythmMult);
     if (data.markers !== undefined) setMarkers(data.markers);
     if (data.metronome !== undefined) setMetronome(data.metronome);
     if (data.sessionSchemes !== undefined) {
@@ -451,6 +507,18 @@ function App() {
     document.addEventListener('mousedown', handleClick);
     return () => document.removeEventListener('mousedown', handleClick);
   }, [showSubdivDial]);
+
+  // Close mult dial on outside click
+  useEffect(() => {
+    if (!showMultDial) return;
+    const handleClick = (e) => {
+      if (multDialRef.current && !multDialRef.current.contains(e.target)) {
+        setShowMultDial(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [showMultDial]);
 
   // Load from URL or autosave on mount
   useEffect(() => {
@@ -510,7 +578,26 @@ function App() {
   const totalBeats = totalColumns(barSubdivisions);
   const handlePlayRef = useRef(null);
   const handleSetSubdivisionsRef = useRef(null);
+  const handleSetRhythmMultRef = useRef(null);
   const handleToggleSoloRef = useRef(null);
+  // Commit the rhythm entry buffer to the appropriate state value.
+  const commitRhythmEntry = useCallback(() => {
+    const buf = rhythmBufRef.current;
+    if (!buf.kind || buf.str === '') return;
+    const max = buf.kind === 'mult' ? RHYTHM_MAX_MULT : RHYTHM_MAX_DIV;
+    let num = parseInt(buf.str, 10);
+    if (!Number.isFinite(num) || num < 1) num = 1;
+    if (num > max) num = max;
+    if (buf.kind === 'mult') {
+      handleSetRhythmMultRef.current?.(num);
+    } else {
+      handleSetSubdivisionsRef.current?.(num);
+    }
+    rhythmBufRef.current = { kind: null, str: '' };
+    rhythmKeysDownRef.current.clear();
+    setRhythmLiveValue(null);
+    setRhythmLiveKind(null);
+  }, []);
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.target.tagName === 'INPUT') return;
@@ -557,30 +644,69 @@ function App() {
           setPositionMode(false);
           positionModeRef.current = false;
           positionBufferRef.current = [];
-          setPositionModeValue(null);
-          numberKeysDownRef.current.clear();
-          return;
-        }       
-        // ...with Esc or the Position mode Hot key 
-        return;
-      }
-
-      // Enter position mode on P
-      if (matchesHotkey(e, hk.positionMode)) {
-        e.preventDefault();
-        setPositionMode(true);
-        positionModeRef.current = true;
-        positionBufferRef.current = [];
-        setPositionModeValue(null);
+setPositionModeValue(null);
         numberKeysDownRef.current.clear();
         return;
-      }
+      }       
+      // ...with Esc or the Position mode Hot key 
+      return;
+    }
 
-      // Number keys 1-9: set tuplet subdivision
-      if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key >= '1' && e.key <= '9') {
-        handleSetSubdivisionsRef.current(Number(e.key));
-        return;
+    // X key held as modifier for multiplier input
+    if (e.code === 'KeyX' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      e.preventDefault();
+      if (!xHeldRef.current) {
+        xHeldRef.current = true;
+        setXHeld(true);
       }
+      return;
+    }
+
+    // Enter position mode on P
+    if (matchesHotkey(e, hk.positionMode)) {
+      e.preventDefault();
+      setPositionMode(true);
+      positionModeRef.current = true;
+      positionBufferRef.current = [];
+      setPositionModeValue(null);
+      numberKeysDownRef.current.clear();
+      return;
+    }
+
+    // Number keys 1-9: set subdivision (default) or multiplier (when X held)
+    // Position-system-style: buffer accumulates on keydown, commits on keyup.
+    // A second digit is allowed only when firstDigit * 10 <= max.
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key >= '1' && e.key <= '9') {
+      if (positionModeRef.current) {
+        // Position mode handles its own number keys
+      } else {
+        e.preventDefault();
+        if (e.repeat) return;
+        // Clear any pending single-digit commit — a new keydown extends/cancels it
+        if (rhythmPendingRef.current) {
+          clearTimeout(rhythmPendingRef.current);
+          rhythmPendingRef.current = null;
+        }
+        const digit = Number(e.key);
+        const buf = rhythmBufRef.current;
+        // Kind is fixed by the first digit of the buffer; X only sets it when
+        // the buffer is empty.
+        const kind = buf.kind || (xHeldRef.current ? 'mult' : 'div');
+        const max = kind === 'mult' ? RHYTHM_MAX_MULT : RHYTHM_MAX_DIV;
+        const bufEmpty = buf.str === '';
+        const firstDigit = bufEmpty ? digit : Number(buf.str[0]);
+        // Allow: empty buffer, or single digit that can still be extended
+        const canAdd = bufEmpty || (buf.str.length === 1 && firstDigit * 10 <= max);
+        if (canAdd) {
+          rhythmKeysDownRef.current.add(e.key);
+          const newStr = bufEmpty ? String(digit) : buf.str + String(digit);
+          rhythmBufRef.current = { kind, str: newStr };
+          setRhythmLiveKind(kind);
+          setRhythmLiveValue(parseInt(newStr, 10));
+        }
+      }
+      return;
+    }
 
       // Jump to previous/next note (configurable hotkey)
       if (matchesHotkey(e, hk.jumpPrevNote) || matchesHotkey(e, hk.jumpNextNote)) {
@@ -680,6 +806,10 @@ function App() {
       if (matchesHotkey(e, hk.fingeringMode)) {
         fingeringModeRef.current = !fingeringModeRef.current;
         setFingeringMode(fingeringModeRef.current);
+      }
+      if (matchesHotkey(e, hk.rhythmUnit)) {
+        e.preventDefault();
+        setRhythmUnit(u => u === 'beat' ? 'bar' : 'beat');
       }
       if (matchesHotkey(e, hk.selectAtPlayhead)) {
         e.preventDefault();
@@ -885,34 +1015,60 @@ function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     const handleKeyUp = (e) => {
-      if (!positionModeRef.current) return;
-      if (e.key >= '0' && e.key <= '9') {
-        numberKeysDownRef.current.delete(e.key);
-        // Only arm timeout if all number keys are released AND buffer has exactly one digit of '1' or '2'
-        if (numberKeysDownRef.current.size === 0 && positionBufferRef.current.length === 1) {
-          const buffered = positionBufferRef.current[0];
-          if (buffered === '1' || buffered === '2') {
-            positionTimeoutRef.current = setTimeout(() => {
-              numberKeysDownRef.current.clear();
-              const pos = Math.min(NUM_FRETS, Math.max(0, parseInt(positionBufferRef.current.join(''), 10)));
-              setPosition(pos);
-              positionBufferRef.current = [];
-              setPositionModeValue(null);
-              setPositionMode(false);
-              positionModeRef.current = false;
-              positionTimeoutRef.current = null;
-            }, 1000); // 1 second grace window
-            return;
+      if (e.code === 'KeyX') {
+        xHeldRef.current = false;
+        setXHeld(false);
+        return;
+      }
+      if (positionModeRef.current) {
+        if (e.key >= '0' && e.key <= '9') {
+          numberKeysDownRef.current.delete(e.key);
+          // Only arm timeout if all number keys are released AND buffer has exactly one digit of '1' or '2'
+          if (numberKeysDownRef.current.size === 0 && positionBufferRef.current.length === 1) {
+            const buffered = positionBufferRef.current[0];
+            if (buffered === '1' || buffered === '2') {
+              positionTimeoutRef.current = setTimeout(() => {
+                numberKeysDownRef.current.clear();
+                const pos = Math.min(NUM_FRETS, Math.max(0, parseInt(positionBufferRef.current.join(''), 10)));
+                setPosition(pos);
+                positionBufferRef.current = [];
+                setPositionModeValue(null);
+                setPositionMode(false);
+                positionModeRef.current = false;
+                positionTimeoutRef.current = null;
+              }, 1000); // 1 second grace window
+              return;
+            }
+          }
+          // Normal commit: all keys up and buffer has a complete number (or no timeout window applies)
+          if (numberKeysDownRef.current.size === 0 && positionTimeoutRef.current === null && positionBufferRef.current.length > 0) {
+            const pos = Math.min(NUM_FRETS, Math.max(0, parseInt(positionBufferRef.current.join(''), 10)));
+            setPosition(pos);
+            positionBufferRef.current = [];
+            setPositionModeValue(null);
+            setPositionMode(false);
+            positionModeRef.current = false;
           }
         }
-        // Normal commit: all keys up and buffer has a complete number (or no timeout window applies)
-        if (numberKeysDownRef.current.size === 0 && positionTimeoutRef.current === null && positionBufferRef.current.length > 0) {
-          const pos = Math.min(NUM_FRETS, Math.max(0, parseInt(positionBufferRef.current.join(''), 10)));
-          setPosition(pos);
-          positionBufferRef.current = [];
-          setPositionModeValue(null);
-          setPositionMode(false);
-          positionModeRef.current = false;
+        return;
+      }
+      // Rhythm entry: commit on keyup when all rhythm keys are released
+      if (e.key >= '1' && e.key <= '9' && rhythmKeysDownRef.current.has(e.key)) {
+        rhythmKeysDownRef.current.delete(e.key);
+        if (rhythmKeysDownRef.current.size === 0 && rhythmBufRef.current.str !== '') {
+          const buf = rhythmBufRef.current;
+          const max = buf.kind === 'mult' ? RHYTHM_MAX_MULT : RHYTHM_MAX_DIV;
+          const firstDigit = Number(buf.str[0]);
+          // Single digit that can still be extended → arm a grace window in case
+          // a second digit arrives. Otherwise commit immediately.
+          if (buf.str.length === 1 && firstDigit * 10 <= max) {
+            rhythmPendingRef.current = setTimeout(() => {
+              commitRhythmEntry();
+              rhythmPendingRef.current = null;
+            }, RHYTHM_PENDING_WINDOW);
+          } else {
+            commitRhythmEntry();
+          }
         }
       }
     };
@@ -921,6 +1077,7 @@ function App() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
       if (positionTimeoutRef.current) clearTimeout(positionTimeoutRef.current);
+      if (rhythmPendingRef.current) clearTimeout(rhythmPendingRef.current);
     };
   }, [totalBeats, undo, redo, setNotes]);
 
@@ -940,17 +1097,17 @@ function App() {
       const filtered = prev.filter(
         n => !(n.stringIndex === stringIndex && Math.abs(n.beat - beat) < 0.001)
       );
-      return [...filtered, { stringIndex, fret, beat, duration: noteDuration, velocity: defaultVelocity }];
+      return [...filtered, { stringIndex, fret, beat, duration: effectiveNoteLength, velocity: defaultVelocity }];
     });
     // Only advance playhead when adding a note, not when erasing
     if (willAutoForward) {
       setSelectedBeat(b => {
-        const next = Math.min(totalBeats - 1, b + noteDuration);
+        const next = Math.min(totalBeats - 1, b + effectiveNoteLength);
         return next >= totalBeats - 1 ? totalBeats - 1 : Math.round(next / snapUnit) * snapUnit;
       });
       autoForwardLastActionRef.current = false;
     }
-  }, [selectedBeat, noteDuration, snapUnit, totalBeats, defaultVelocity, fretboardAutoForward, notes]);
+  }, [selectedBeat, effectiveNoteLength, snapUnit, totalBeats, defaultVelocity, fretboardAutoForward, notes]);
   const handleAdjacentClick = useCallback((stringIndex, fret, stayInPlace = false) => {
     const beat = Math.round(selectedBeat / snapUnit) * snapUnit;
     const exactMatch = notes.findIndex(
@@ -967,16 +1124,16 @@ function App() {
       if (idx >= 0) {
         return prev.filter((_, i) => i !== idx);
       }
-      return [...prev, { stringIndex, fret, beat, duration: noteDuration, velocity: defaultVelocity }];
+      return [...prev, { stringIndex, fret, beat, duration: effectiveNoteLength, velocity: defaultVelocity }];
     });
     if (willAutoForward) {
       setSelectedBeat(b => {
-        const next = Math.min(totalBeats - 1, b + noteDuration);
+        const next = Math.min(totalBeats - 1, b + effectiveNoteLength);
         return next >= totalBeats - 1 ? totalBeats - 1 : Math.round(next / snapUnit) * snapUnit;
       });
       autoForwardLastActionRef.current = false;
     }
-  }, [selectedBeat, noteDuration, snapUnit, totalBeats, defaultVelocity, fretboardAutoForward, fretboardAutoForwardExcludeAdjacent, notes]);
+  }, [selectedBeat, effectiveNoteLength, snapUnit, totalBeats, defaultVelocity, fretboardAutoForward, fretboardAutoForwardExcludeAdjacent, notes]);
 
   const handleMoveNote = useCallback((fromString, fromFret, toString, toFret) => {
     setNotes(prev => {
@@ -996,15 +1153,28 @@ function App() {
 
   const handleSetSubdivisions = useCallback((subs) => {
     setSubdivisions(subs);
-    setNoteDuration(1 / subs);
-    if (selectedNotes.size > 0) {
-      const dur = 1 / subs;
+    const newMult = resetMultOnSubdivRef.current ? 1 : rhythmMult;
+    if (resetMultOnSubdivRef.current) setRhythmMult(1);
+    // noteDuration is now derived from effectiveNoteLength
+    if (rhythmAltersSelectedRef.current && selectedNotes.size > 0) {
+      const dur = (unitBeats / subs) * newMult;
       setNotes(prev => prev.map((n, i) =>
         selectedNotes.has(i) ? { ...n, duration: dur } : n
       ));
     }
-  }, [selectedNotes]);
+  }, [selectedNotes, rhythmMult, unitBeats]);
   handleSetSubdivisionsRef.current = handleSetSubdivisions;
+
+  const handleSetRhythmMult = useCallback((mult) => {
+    setRhythmMult(mult);
+    if (rhythmAltersSelectedRef.current && selectedNotes.size > 0) {
+      const dur = baseSubdivBeats * mult;
+      setNotes(prev => prev.map((n, i) =>
+        selectedNotes.has(i) ? { ...n, duration: dur } : n
+      ));
+    }
+  }, [selectedNotes, baseSubdivBeats]);
+  handleSetRhythmMultRef.current = handleSetRhythmMult;
 
 
   const handleNoteDurationChange = useCallback((stringIndex, fret, newDuration) => {
@@ -1702,49 +1872,103 @@ function App() {
           Clear
         </button>
         <span className="toolbar-separator" />
-        <div className="subdiv-picker" ref={subdivDialRef}>
+        <div className="rhythm-cluster">
           <button
-            className={`subdiv-btn ${showSubdivDial ? 'open' : ''}`}
-            onClick={() => setShowSubdivDial(o => !o)}
+            type="button"
+            className="rhythm-unit-btn"
+            onClick={() => setRhythmUnit(u => u === 'beat' ? 'bar' : 'beat')}
+            title="Toggle whether the division refers to a beat or a bar"
           >
-            ÷{subdivisions}
+            {rhythmUnit === 'bar' ? 'BAR' : 'BEAT'}
           </button>
-          {showSubdivDial && (
-            <div className="subdiv-popup">
-              <div className="subdiv-dial-large">
-                <svg width={120} height={120} viewBox="0 0 120 120">
-                  <circle cx={60} cy={60} r={48} fill="none" stroke="#333" strokeWidth={2} />
-                  {Array.from({ length: 16 }, (_, i) => i + 1).map(val => {
-                    const angle = ((val - 1) / 16) * 2 * Math.PI - Math.PI / 2;
-                    const x = 60 + 48 * Math.cos(angle);
-                    const y = 60 + 48 * Math.sin(angle);
-                    const isActive = val === subdivisions;
-                    return (
-                      <g key={val} style={{ cursor: 'pointer' }} onClick={() => { handleSetSubdivisions(val); }}>
-                        <circle cx={x} cy={y} r={isActive ? 10 : 7}
-                          fill={isActive ? '#e67e22' : '#2a2a2a'}
-                          stroke={isActive ? '#e67e22' : '#555'} strokeWidth={1}
-                        />
-                        <text x={x} y={y} textAnchor="middle" dominantBaseline="central"
-                          fontSize={10} fontWeight="bold"
-                          fill={isActive ? '#000' : '#999'}
-                          style={{ pointerEvents: 'none' }}
-                        >{val}</text>
-                      </g>
-                    );
-                  })}
-                </svg>
-                <NumberInput
-                  className="subdiv-center-input"
-                  value={subdivisions}
-                  min={1}
-                  max={64}
-                  onChange={handleSetSubdivisions}
-                  onClick={(e) => e.stopPropagation()}
-                />
+          <div className="subdiv-picker" ref={subdivDialRef}>
+            <button
+              className={`subdiv-btn ${showSubdivDial ? 'open' : ''} ${rhythmLiveKind === 'div' ? 'live' : ''}`}
+              onClick={() => setShowSubdivDial(o => !o)}
+            >
+              ÷{rhythmLiveKind === 'div' && rhythmLiveValue != null ? rhythmLiveValue : subdivisions}
+            </button>
+            {showSubdivDial && (
+              <div className="subdiv-popup">
+                <div className="subdiv-dial-large">
+                  <svg width={120} height={120} viewBox="0 0 120 120">
+                    <circle cx={60} cy={60} r={48} fill="none" stroke="#333" strokeWidth={2} />
+                    {Array.from({ length: 16 }, (_, i) => i + 1).map(val => {
+                      const angle = ((val - 1) / 16) * 2 * Math.PI - Math.PI / 2;
+                      const x = 60 + 48 * Math.cos(angle);
+                      const y = 60 + 48 * Math.sin(angle);
+                      const isActive = val === subdivisions;
+                      return (
+                        <g key={val} style={{ cursor: 'pointer' }} onClick={() => { handleSetSubdivisions(val); }}>
+                          <circle cx={x} cy={y} r={isActive ? 10 : 7}
+                            fill={isActive ? '#e67e22' : '#2a2a2a'}
+                            stroke={isActive ? '#e67e22' : '#555'} strokeWidth={1}
+                          />
+                          <text x={x} y={y} textAnchor="middle" dominantBaseline="central"
+                            fontSize={10} fontWeight="bold"
+                            fill={isActive ? '#000' : '#999'}
+                            style={{ pointerEvents: 'none' }}
+                          >{val}</text>
+                        </g>
+                      );
+                    })}
+                  </svg>
+                  <NumberInput
+                    className="subdiv-center-input"
+                    value={subdivisions}
+                    min={1}
+                    max={32}
+                    onChange={handleSetSubdivisions}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
+          <div className="subdiv-picker" ref={multDialRef}>
+            <button
+              className={`subdiv-btn ${showMultDial ? 'open' : ''} ${rhythmLiveKind === 'mult' || xHeld ? 'live' : ''}`}
+              onClick={() => setShowMultDial(o => !o)}
+            >
+              ×{rhythmLiveKind === 'mult' && rhythmLiveValue != null ? rhythmLiveValue : rhythmMult}
+            </button>
+            {showMultDial && (
+              <div className="subdiv-popup">
+                <div className="subdiv-dial-large">
+                  <svg width={120} height={120} viewBox="0 0 120 120">
+                    <circle cx={60} cy={60} r={48} fill="none" stroke="#333" strokeWidth={2} />
+                    {Array.from({ length: 8 }, (_, i) => i + 1).map(val => {
+                      const angle = ((val - 1) / 8) * 2 * Math.PI - Math.PI / 2;
+                      const x = 60 + 48 * Math.cos(angle);
+                      const y = 60 + 48 * Math.sin(angle);
+                      const isActive = val === rhythmMult;
+                      return (
+                          <g key={val} style={{ cursor: 'pointer' }} onClick={() => { handleSetRhythmMult(val); }}>
+                           <circle cx={x} cy={y} r={isActive ? 10 : 7}
+                             fill={isActive ? '#e67e22' : '#2a2a2a'}
+                             stroke={isActive ? '#e67e22' : '#555'} strokeWidth={1}
+                           />
+                           <text x={x} y={y} textAnchor="middle" dominantBaseline="central"
+                             fontSize={10} fontWeight="bold"
+                             fill={isActive ? '#000' : '#999'}
+                             style={{ pointerEvents: 'none' }}
+                           >{val}</text>
+                         </g>
+                      );
+                    })}
+                  </svg>
+                  <NumberInput
+                    className="subdiv-center-input"
+                    value={rhythmMult}
+                    min={1}
+                    max={32}
+                    onChange={handleSetRhythmMult}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
       <TrackStrip
@@ -1930,11 +2154,13 @@ function App() {
           setVerticalScroll={setVerticalScroll}
           machineGunMode={machineGunMode}
           defaultVelocity={defaultVelocity}
-          noteDuration={noteDuration}
+          noteDuration={effectiveNoteLength}
           setNoteDuration={setNoteDuration}
           onResizeDuration={setNoteDuration}
           snapUnit={snapUnit}
           subdivisions={subdivisions}
+          rhythmMult={rhythmMult}
+          rhythmUnit={rhythmUnit}
           hotkeys={hotkeys}
           hoverPreviewPiano={hoverPreview.pianoRoll}
           hoverPreviewNotes={hoverPreview.timelineNotes}
@@ -1976,7 +2202,7 @@ function App() {
               selectedNotes={selectedNotes}
               selectedBeat={selectedBeat}
               chordRoot={chordRoot}
-              noteDuration={noteDuration}
+              noteDuration={effectiveNoteLength}
               onStampChord={handleStampChord}
               onPreviewChange={setChordPreview}
             />
@@ -2096,6 +2322,10 @@ function App() {
           }}
           swungDisplay={swungDisplay}
           onSwungDisplayChange={(v) => { setSwungDisplay(v); try { localStorage.setItem('guitar-roll-swung-display', String(v)); } catch {} }}
+          resetMultOnSubdiv={resetMultOnSubdiv}
+          onResetMultOnSubdivChange={(v) => { setResetMultOnSubdiv(v); try { localStorage.setItem('guitar-roll-reset-mult-on-subdiv', String(v)); } catch {} }}
+          rhythmAltersSelected={rhythmAltersSelected}
+          onRhythmAltersSelectedChange={(v) => { setRhythmAltersSelected(v); try { localStorage.setItem('guitar-roll-rhythm-alters-selected', String(v)); } catch {} }}
           onHotkeysChange={setHotkeys}
         />
       )}

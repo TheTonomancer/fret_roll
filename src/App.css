@@ -208,14 +208,9 @@ input[type="number"] {
 }
 
 .subdiv-btn:hover, .subdiv-btn.open {
-  border-color: #3498db;
-  background: #333;
-}
-
-.subdiv-val {
-  color: #888;
-  font-size: 10px;
-  margin-left: 4px;
+  border-color: #aaa;
+  background: #353535;
+  color: #fff;
 }
 
 .subdiv-popup {
@@ -266,26 +261,58 @@ input[type="number"] {
   border-color: #e67e22;
 }
 
-.subdiv-mult-row {
+/* Rhythm cluster (beat/bar, subdivision, multiplier) */
+.rhythm-cluster {
   display: flex;
   align-items: center;
-  gap: 8px;
-}
-
-.subdiv-mult-input {
-  width: 44px;
-  background: #2a2a2a;
-  color: #fff;
-  border: 1px solid #555;
+  gap: 6px;
+  padding: 2px 6px;
+  background: #1a1a1a;
+  border: 1px solid #444;
   border-radius: 4px;
-  padding: 4px;
-  font-size: 13px;
-  text-align: center;
-  outline: none;
 }
 
-.subdiv-mult-input:focus {
-  border-color: #3498db;
+.rhythm-unit-btn {
+  background: transparent;
+  color: #888;
+  border: 1px solid transparent;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.rhythm-unit-btn:hover {
+  background: #282828;
+  color: #fff;
+}
+
+/* Make subdiv-picker work well inside rhythm-cluster */
+.rhythm-cluster .subdiv-picker {
+  position: relative;
+}
+
+.rhythm-cluster .subdiv-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  min-width: 44px;
+  text-align: center;
+}
+
+/* Live entry indicator — shows while digits are typed or while X is held (multiplier target) */
+.rhythm-cluster .subdiv-btn.live {
+  border-color: #ffffff;
+  background: #1a1a1a;
+  color: #fff;
+}
+
+.rhythm-cluster .subdiv-popup {
+  left: 0;
+  transform: none;
+  margin-top: 2px;
 }
 
 /* Chord Sidebar */
