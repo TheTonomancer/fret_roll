@@ -261,7 +261,7 @@ function App() {
   const [hoverPreview, setHoverPreview] = useState(() => {
     try {
       const saved = JSON.parse(localStorage.getItem('guitar-roll-hover-preview'));
-      return { fretboard: false, pianoRoll: false, timelineNotes: false, volume: 0.3, ...saved };
+      return { fretboard: true, pianoRoll: false, timelineNotes: false, volume: 0.3, ...saved };
     } catch { return { fretboard: false, pianoRoll: false, timelineNotes: false, volume: 0.3 }; }
   });
   const [markers, setMarkers] = useState([]); // [{ id, name, beat, color }]
@@ -270,20 +270,20 @@ function App() {
   const [tupletLines, setTupletLines] = useState(() => {
     try {
       const saved = JSON.parse(localStorage.getItem('guitar-roll-tuplet-lines'));
-      return { visible: true, opacity: 0.35, ...saved };
-    } catch { return { visible: true, opacity: 0.35 }; }
+      return { visible: false, opacity: 0.35, ...saved };
+    } catch { return { visible: false, opacity: 0.35 }; }
   });
   const [autoScroll, setAutoScroll] = useState(() => {
     try {
       const saved = JSON.parse(localStorage.getItem('guitar-roll-auto-scroll'));
-      return { onHover: true, onInput: true, onPlayback: true, ...saved };
-    } catch { return { onHover: true, onInput: true, onPlayback: true }; }
+      return { onHover: false, onInput: false, onPlayback: false, ...saved };
+    } catch { return { onHover: false, onInput: false, onPlayback: false }; }
   });
   const [hoverPill, setHoverPill] = useState(() => {
     try {
       const saved = JSON.parse(localStorage.getItem('guitar-roll-hover-pill'));
-      return { fretboard: true, pianoRoll: true, ...saved };
-    } catch { return { fretboard: true, pianoRoll: true }; }
+      return { fretboard: true, pianoRoll: false, ...saved };
+    } catch { return { fretboard: true, pianoRoll: false }; }
   });
   const [swungDisplay, setSwungDisplay] = useState(() => {
     try {
