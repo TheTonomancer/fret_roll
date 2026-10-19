@@ -22,7 +22,7 @@ import NumberInput from './components/NumberInput';
 import './App.css';
 
 function createDefaultTrack(name = 'Track 1', instrument = 'clean-electric') {
-  return { id: crypto.randomUUID(), name, instrument, type: 'notes', notes: [], volume: 1, muted: false, solo: false, visible: true, bgOpacity: 0.2, schemeName: null, audioFileName: null, audioDuration: 0, audioOffset: 0, waveformPeaks: null };
+  return { id: crypto.randomUUID(), name, instrument, type: 'notes', notes: [], volume: 1, muted: false, solo: false, visible: true, bgOpacity: 0.2, schemeName: null, activeInstanceScheme: null, audioFileName: null, audioDuration: 0, audioOffset: 0, waveformPeaks: null };
 }
 
 function getPlayableTracks(tracks) {
@@ -57,6 +57,7 @@ function App() {
   const notes = activeTrack ? activeTrack.notes : [];
   const notesRef = useRef(notes);
   notesRef.current = notes;
+  const activeScheme = activeTrack?.activeInstanceScheme ?? null;
 
   // Helper: update only the active track's notes
   const setActiveNotes = useCallback((updater) => {
@@ -321,6 +322,8 @@ function App() {
   const [fretboardZoom, setFretboardZoom] = useState(1);
   const [stringColors, setStringColors] = useState(['#ffffff', '#ffffff', '#ffffff', '#ffffff', '#ffffff', '#ffffff']);
   const [showSettings, setShowSettings] = useState(false);
+  const showSettingsRef = useRef(showSettings);
+  showSettingsRef.current = showSettings;
   const [hotkeys, setHotkeys] = useState(loadHotkeys);
   const hotkeysRef = useRef(hotkeys);
   hotkeysRef.current = hotkeys;
@@ -329,6 +332,10 @@ function App() {
   const [showCheatSheet, setShowCheatSheet] = useState(false);
   const [showSubdivDial, setShowSubdivDial] = useState(false);
   const subdivDialRef = useRef(null);
+  const [showInstanceColorPicker, setShowInstanceColorPicker] = useState(false);
+  const instanceColorPickerRef = useRef(showInstanceColorPicker);
+  instanceColorPickerRef.current = showInstanceColorPicker;
+  const [instanceColorPickerPos, setInstanceColorPickerPos] = useState({ x: 0, y: 0 });
   const [showMultDial, setShowMultDial] = useState(false);
   const multDialRef = useRef(null);
   const [showSynthEditor, setShowSynthEditor] = useState(false);
@@ -353,6 +360,12 @@ function App() {
   useEffect(() => {
     saveSessionSchemeState(sessionScheme, sessionSchemes);
   }, [sessionScheme, sessionSchemes]);
+
+  useEffect(() => {
+    if (showInstanceColorPicker) {
+      setShowInstanceColorPicker(false);
+    }
+  }, [selectedNotes.size]);
 
   const bpmRef = useRef(bpm);
   const metronomeRef = useRef(metronome);
@@ -408,13 +421,35 @@ function App() {
     ? (sessionSchemes?.[activeTrack.schemeName] || listColorSchemes()[activeTrack.schemeName] || null)
     : null;
 
-  const getNoteColor = useCallback((stringIndex, fret) => {
+  const getNoteColor = useCallback((stringIndexOrNote, fretOrMaybe, noteIndexOrMaybe) => {
+    let stringIndex, fret, note;
+    if (typeof stringIndexOrNote === 'object' && stringIndexOrNote !== null) {
+      stringIndex = stringIndexOrNote.stringIndex;
+      fret = stringIndexOrNote.fret;
+      note = stringIndexOrNote;
+    } else {
+      stringIndex = stringIndexOrNote;
+      fret = fretOrMaybe;
+      if (typeof noteIndexOrMaybe === 'number') {
+        note = notesRef.current[noteIndexOrMaybe];
+      }
+    }
     const name = getNoteName(stringIndex, fret);
     const letter = name.replace(/[0-9]/g, '');
+    if (note?.instanceSchemeName) {
+      const scheme = (sessionSchemes?.[note.instanceSchemeName] || listColorSchemes()[note.instanceSchemeName]) || null;
+      if (scheme && scheme[letter]) return scheme[letter];
+    }
     if (activeTrackScheme && activeTrackScheme[letter]) return activeTrackScheme[letter];
+    if (sessionScheme?.name) {
+      const gscheme = (sessionSchemes?.[sessionScheme.name] || listColorSchemes()[sessionScheme.name] || sessionScheme.colors || null);
+      if (gscheme && gscheme[letter]) return gscheme[letter];
+    } else if (sessionScheme?.colors && sessionScheme.colors[letter]) {
+      return sessionScheme.colors[letter];
+    }
     if (synesthesiaMap[letter]) return synesthesiaMap[letter];
     return stringColors[stringIndex];
-  }, [stringColors, synesthesia, activeTrackScheme, sessionSchemes]);
+  }, [stringColors, synesthesia, activeTrackScheme, sessionSchemes, sessionScheme]);
 
   // Apply partial state from settings/load/URL
   const applyState = useCallback((data) => {
@@ -746,7 +781,7 @@ setPositionModeValue(null);
           return next >= totalBeats - 1 ? totalBeats - 1 : Math.round(next / snap) * snap;
         });
       }
-      if (matchesHotkey(e, hk.returnToStart)) {
+      if (matchesHotkey(e, hk.returnToStart) && !instanceColorPickerRef.current) {
         e.preventDefault();
         setSelectedBeat(0);
       }
@@ -810,6 +845,17 @@ setPositionModeValue(null);
       if (matchesHotkey(e, hk.rhythmUnit)) {
         e.preventDefault();
         setRhythmUnit(u => u === 'beat' ? 'bar' : 'beat');
+      }
+      if (matchesHotkey(e, hk.applyInstanceColor)) {
+        e.preventDefault();
+        if (showSettingsRef.current) return;
+        const next = !instanceColorPickerRef.current;
+        setShowInstanceColorPicker(next);
+        if (next) {
+          setInstanceColorPickerPos({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
+        } else if (selectedNotesRef.current.size === 0) {
+          setTracksTracked(prev => prev.map(t => t.id === activeTrackId ? { ...t, activeInstanceScheme: null } : t));
+        }
       }
       if (matchesHotkey(e, hk.selectAtPlayhead)) {
         e.preventDefault();
@@ -1087,9 +1133,9 @@ setPositionModeValue(null);
       n => n.stringIndex === stringIndex && n.fret === fret && Math.abs(n.beat - beat) < 0.001
     );
     const willAutoForward = exactMatch < 0 && fretboardAutoForward !== stayInPlace;
-    if (willAutoForward) {
-      autoForwardLastActionRef.current = true;
-    }
+      if (willAutoForward) {
+        autoForwardLastActionRef.current = true;
+      }
     setNotes(prev => {
       if (exactMatch >= 0) {
         return prev.filter((_, i) => i !== exactMatch);
@@ -1097,7 +1143,7 @@ setPositionModeValue(null);
       const filtered = prev.filter(
         n => !(n.stringIndex === stringIndex && Math.abs(n.beat - beat) < 0.001)
       );
-      return [...filtered, { stringIndex, fret, beat, duration: effectiveNoteLength, velocity: defaultVelocity }];
+      return [...filtered, { stringIndex, fret, beat, duration: effectiveNoteLength, velocity: defaultVelocity, instanceSchemeName: activeTrack?.activeInstanceScheme ?? null }];
     });
     // Only advance playhead when adding a note, not when erasing
     if (willAutoForward) {
@@ -1107,7 +1153,7 @@ setPositionModeValue(null);
       });
       autoForwardLastActionRef.current = false;
     }
-  }, [selectedBeat, effectiveNoteLength, snapUnit, totalBeats, defaultVelocity, fretboardAutoForward, notes]);
+  }, [selectedBeat, effectiveNoteLength, snapUnit, totalBeats, defaultVelocity, fretboardAutoForward, notes, activeScheme]);
   const handleAdjacentClick = useCallback((stringIndex, fret, stayInPlace = false) => {
     const beat = Math.round(selectedBeat / snapUnit) * snapUnit;
     const exactMatch = notes.findIndex(
@@ -1124,7 +1170,7 @@ setPositionModeValue(null);
       if (idx >= 0) {
         return prev.filter((_, i) => i !== idx);
       }
-      return [...prev, { stringIndex, fret, beat, duration: effectiveNoteLength, velocity: defaultVelocity }];
+      return [...prev, { stringIndex, fret, beat, duration: effectiveNoteLength, velocity: defaultVelocity, instanceSchemeName: activeScheme }];
     });
     if (willAutoForward) {
       setSelectedBeat(b => {
@@ -1133,7 +1179,7 @@ setPositionModeValue(null);
       });
       autoForwardLastActionRef.current = false;
     }
-  }, [selectedBeat, effectiveNoteLength, snapUnit, totalBeats, defaultVelocity, fretboardAutoForward, fretboardAutoForwardExcludeAdjacent, notes]);
+  }, [selectedBeat, effectiveNoteLength, snapUnit, totalBeats, defaultVelocity, fretboardAutoForward, fretboardAutoForwardExcludeAdjacent, notes, activeScheme]);
 
   const handleMoveNote = useCallback((fromString, fromFret, toString, toFret) => {
     setNotes(prev => {
@@ -1783,7 +1829,7 @@ setPositionModeValue(null);
         </button>
         <button
           className="tool-btn"
-          onClick={() => setShowSettings(true)}
+          onClick={() => { setShowSettings(true); setShowInstanceColorPicker(false); }}
           title="Settings"
         >
           Settings
@@ -2103,7 +2149,8 @@ setPositionModeValue(null);
           fretboardAutoForward={fretboardAutoForward}
           swing={swing}
           swungDisplay={swungDisplay}
-         />
+          activeInstanceScheme={activeTrack?.activeInstanceScheme || null}
+        />
         <Timeline
           notes={notes}
           backgroundNotes={tracks.filter(t => t.id !== activeTrackId && t.visible !== false).flatMap(t =>
@@ -2191,6 +2238,7 @@ setPositionModeValue(null);
           setPosition={setPosition}
           swing={swing}
           swungDisplay={swungDisplay}
+          activeInstanceScheme={activeTrack?.activeInstanceScheme || null}
         />
         <div className={`chord-sidebar ${chordPaletteOpen ? 'open' : ''}`}>
           <button className="chord-sidebar-toggle" onClick={() => setChordPaletteOpen(o => !o)}>
@@ -2329,6 +2377,112 @@ setPositionModeValue(null);
           onHotkeysChange={setHotkeys}
         />
       )}
+      {showInstanceColorPicker && (
+        <InstanceColorPicker
+          position={instanceColorPickerPos}
+          sessionSchemes={sessionSchemes}
+          selectedNotes={selectedNotes}
+          highlightScheme={
+            (() => {
+              if (selectedNotes.size > 0) {
+                const schemes = new Set();
+                selectedNotes.forEach(i => schemes.add(notes[i]?.instanceSchemeName));
+                return schemes.size === 1 ? [...schemes][0] : null;
+              }
+              return activeTrack?.activeInstanceScheme ?? null;
+            })()
+          }
+          onClose={() => setShowInstanceColorPicker(false)}
+          onApply={(schemeName) => {
+            if (selectedNotes.size > 0) {
+              setNotes(prev => prev.map((n, i) => selectedNotes.has(i) ? { ...n, instanceSchemeName: schemeName } : n));
+            } else {
+              setTracksTracked(prev => prev.map(t => t.id === activeTrackId ? { ...t, activeInstanceScheme: schemeName } : t));
+            }
+            setShowInstanceColorPicker(false);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function InstanceColorPicker({ position, sessionSchemes, selectedNotes, highlightScheme, onClose, onApply }) {
+  const schemes = { ...sessionSchemes };
+  try {
+    const saved = JSON.parse(localStorage.getItem('guitar-roll-color-schemes') || '{}');
+    Object.assign(schemes, saved);
+  } catch {}
+  const schemeNames = Object.keys(schemes);
+  const containerRef = useRef(null);
+  const focusedIndexRef = useRef(0);
+  const [focusedIndex, setFocusedIndex] = useState(() => {
+    if (highlightScheme === null) return 0;
+    const idx = schemeNames.indexOf(highlightScheme);
+    return idx >= 0 ? idx + 1 : 0;
+  });
+  focusedIndexRef.current = focusedIndex;
+  useEffect(() => {
+    const esc = (e) => { if (e.key === 'Escape') onClose(); };
+    const nav = (e) => {
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        e.stopPropagation();
+        const total = 1 + schemeNames.length;
+        const delta = e.key === 'ArrowUp' ? -1 : 1;
+        const next = (focusedIndexRef.current + delta + total) % total;
+        focusedIndexRef.current = next;
+        setFocusedIndex(next);
+        setTimeout(() => {
+          const btn = containerRef.current?.querySelector('.instance-color-picker-focused');
+          btn?.scrollIntoView({ block: 'nearest' });
+        }, 0);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        const scheme = focusedIndexRef.current === 0 ? null : schemeNames[focusedIndexRef.current - 1];
+        onApply(scheme);
+      }
+    };
+    document.addEventListener('keydown', esc);
+    document.addEventListener('keydown', nav);
+    return () => {
+      document.removeEventListener('keydown', esc);
+      document.removeEventListener('keydown', nav);
+    };
+  }, [onClose, schemeNames.length, onApply]);
+  useEffect(() => {
+    const btn = containerRef.current?.querySelector('.instance-color-picker-highlighted');
+    btn?.scrollIntoView({ block: 'nearest' });
+  }, [highlightScheme]);
+  const getPreviewColors = (name) => {
+    const sc = schemes[name];
+    if (!sc) return [];
+    const notes = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+    return notes.map(n => sc[n]).filter(Boolean).slice(0, 6);
+  };
+  const left = Math.min(position.x, window.innerWidth - 260);
+  const top = Math.min(position.y, window.innerHeight - 300);
+  return (
+    <div className="instance-color-picker-overlay" onClick={(e) => { if (e.target.classList.contains('instance-color-picker-overlay')) onClose(); }}>
+      <div ref={containerRef} className="instance-color-picker" style={{ position: 'absolute', left, top }}>
+        <div style={{ color: '#fff', fontSize: 12, marginBottom: 6, fontWeight: 'bold' }}>
+          {selectedNotes.size > 0 ? 'Instance color for selected notes' : 'Instance color for new notes'}
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <button className={`settings-btn-sm ${focusedIndex === 0 ? 'instance-color-picker-focused' : ''} ${highlightScheme === null ? 'instance-color-picker-highlighted' : ''}`} onClick={() => onApply(null)} style={{ textAlign: 'left' }}>None</button>
+          {schemeNames.map((name, i) => (
+            <button key={name} className={`settings-btn-sm ${focusedIndex === i + 1 ? 'instance-color-picker-focused' : ''} ${highlightScheme === name ? 'instance-color-picker-highlighted' : ''}`} onClick={() => onApply(name)} style={{ textAlign: 'left', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+              <div className="scheme-colors-preview" style={{ display: 'flex', gap: 2 }}>
+                {getPreviewColors(name).map((c, ci) => (
+                  <div key={ci} className="scheme-color-dot" style={{ width: 10, height: 10, background: c, border: '1px solid #333' }} />
+                ))}
+              </div>
+              <span style={{ fontSize: 11, color: '#ddd' }}>{name}</span>
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
