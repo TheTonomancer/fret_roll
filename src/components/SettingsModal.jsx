@@ -1069,4 +1069,4 @@ function HotkeysPage({ onBack, onClose, onHotkeysChange }) {
             { label: 'Paste', display: 'Ctrl + V' },
             ...(REFERENCE_ACTIONS || []),
           ].map((a, i) => (
-            <div key={'ref-' + i} className="hotkey-row" title={a.description}>
+            <div key={`ref-${i}`} className="hotkey-row" title={a.description}>
