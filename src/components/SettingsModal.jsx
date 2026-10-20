@@ -1070,3 +1070,13 @@ function HotkeysPage({ onBack, onClose, onHotkeysChange }) {
             ...(REFERENCE_ACTIONS || []),
           ].map((a, i) => (
             <div key={`ref-${i}`} className="hotkey-row" title={a.description}>
+              <span className="hotkey-label">{a.label}</span>
+              <span className="hotkey-key fixed">{a.display}</span>
+            </div>
+          ))}
+        </div>
+
+      </div>
+    </div>
+  );
+}
