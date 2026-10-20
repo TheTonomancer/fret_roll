@@ -165,6 +165,12 @@ function App() {
   const playheadBeatRef = useRef(null);
   // Shared ref to the Timeline's scroll body so Fretboard drags can trigger its auto-pan.
   const timelineBodyRef = useRef(null);
+  const lastMousePosRef = useRef({ x: 0, y: 0 });
+  useEffect(() => {
+    const handler = (e) => { lastMousePosRef.current = { x: e.clientX, y: e.clientY }; };
+    window.addEventListener('mousemove', handler);
+    return () => window.removeEventListener('mousemove', handler);
+  }, []);
   const [selectedBeat, setSelectedBeat] = useState(0);
   const [subdivisions, setSubdivisions] = useState(4); // how many subdivisions per beat
   const [rhythmUnit, setRhythmUnit] = useState('beat'); // 'beat' | 'bar'
@@ -207,6 +213,15 @@ function App() {
   useEffect(() => {
     try { localStorage.setItem('guitar-roll-rhythm-alters-selected', String(rhythmAltersSelected)); } catch {}
   }, [rhythmAltersSelected]);
+  const [selectingSchemeClosesMenu, setSelectingSchemeClosesMenu] = useState(() => {
+    try {
+      const saved = localStorage.getItem('guitar-roll-selecting-scheme-closes-menu');
+      return saved === null ? true : saved === 'true';
+    } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('guitar-roll-selecting-scheme-closes-menu', String(selectingSchemeClosesMenu)); } catch {}
+  }, [selectingSchemeClosesMenu]);
   const [timeSignature, setTimeSignature] = useState([4, 4]); // [numerator, denominator]
   const unitBeats = rhythmUnit === 'bar' ? (timeSignature[0] || 4) : 1;
   const baseSubdivBeats = unitBeats / subdivisions;
@@ -332,10 +347,10 @@ function App() {
   const [showCheatSheet, setShowCheatSheet] = useState(false);
   const [showSubdivDial, setShowSubdivDial] = useState(false);
   const subdivDialRef = useRef(null);
-  const [showInstanceColorPicker, setShowInstanceColorPicker] = useState(false);
-  const instanceColorPickerRef = useRef(showInstanceColorPicker);
-  instanceColorPickerRef.current = showInstanceColorPicker;
-  const [instanceColorPickerPos, setInstanceColorPickerPos] = useState({ x: 0, y: 0 });
+  const [showInstanceColorMenu, setShowInstanceColorMenu] = useState(false);
+  const instanceColorMenuRef = useRef(showInstanceColorMenu);
+  instanceColorMenuRef.current = showInstanceColorMenu;
+  const [instanceColorMenuPos, setInstanceColorMenuPos] = useState({ left: window.innerWidth / 2, top: window.innerHeight / 2, right: null });
   const [showMultDial, setShowMultDial] = useState(false);
   const multDialRef = useRef(null);
   const [showSynthEditor, setShowSynthEditor] = useState(false);
@@ -362,8 +377,8 @@ function App() {
   }, [sessionScheme, sessionSchemes]);
 
   useEffect(() => {
-    if (showInstanceColorPicker) {
-      setShowInstanceColorPicker(false);
+    if (showInstanceColorMenu) {
+      setShowInstanceColorMenu(false);
     }
   }, [selectedNotes.size]);
 
@@ -781,7 +796,7 @@ setPositionModeValue(null);
           return next >= totalBeats - 1 ? totalBeats - 1 : Math.round(next / snap) * snap;
         });
       }
-      if (matchesHotkey(e, hk.returnToStart) && !instanceColorPickerRef.current) {
+      if (matchesHotkey(e, hk.returnToStart) && !instanceColorMenuRef.current) {
         e.preventDefault();
         setSelectedBeat(0);
       }
@@ -849,10 +864,27 @@ setPositionModeValue(null);
       if (matchesHotkey(e, hk.applyInstanceColor)) {
         e.preventDefault();
         if (showSettingsRef.current) return;
-        const next = !instanceColorPickerRef.current;
-        setShowInstanceColorPicker(next);
+        const next = !instanceColorMenuRef.current;
+        setShowInstanceColorMenu(next);
         if (next) {
-          setInstanceColorPickerPos({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
+          const body = timelineBodyRef.current;
+          const pos = lastMousePosRef.current;
+          let x = window.innerWidth / 2;
+          let y = window.innerHeight / 2;
+          if (body) {
+            const rect = body.getBoundingClientRect();
+            if (pos.x >= rect.left && pos.x <= rect.right && pos.y >= rect.top && pos.y <= rect.bottom) {
+              const midX = rect.left + rect.width / 2;
+              if (pos.x < midX) {
+                setInstanceColorMenuPos({ left: pos.x + 12, top: pos.y + 12, right: null });
+                return;
+              } else {
+                setInstanceColorMenuPos({ left: null, top: pos.y + 12, right: window.innerWidth - pos.x + 12 });
+                return;
+              }
+            }
+          }
+          setInstanceColorMenuPos({ left: x, top: y, right: null });
         } else if (selectedNotesRef.current.size === 0) {
           setTracksTracked(prev => prev.map(t => t.id === activeTrackId ? { ...t, activeInstanceScheme: null } : t));
         }
@@ -1829,7 +1861,7 @@ setPositionModeValue(null);
         </button>
         <button
           className="tool-btn"
-          onClick={() => { setShowSettings(true); setShowInstanceColorPicker(false); }}
+          onClick={() => { setShowSettings(true);}}
           title="Settings"
         >
           Settings
@@ -2374,12 +2406,14 @@ setPositionModeValue(null);
           onResetMultOnSubdivChange={(v) => { setResetMultOnSubdiv(v); try { localStorage.setItem('guitar-roll-reset-mult-on-subdiv', String(v)); } catch {} }}
           rhythmAltersSelected={rhythmAltersSelected}
           onRhythmAltersSelectedChange={(v) => { setRhythmAltersSelected(v); try { localStorage.setItem('guitar-roll-rhythm-alters-selected', String(v)); } catch {} }}
+          selectingSchemeClosesMenu={selectingSchemeClosesMenu}
+          onSelectingSchemeClosesMenuChange={(v) => { setSelectingSchemeClosesMenu(v); try { localStorage.setItem('guitar-roll-selecting-scheme-closes-menu', String(v)); } catch {} }}
           onHotkeysChange={setHotkeys}
         />
       )}
-      {showInstanceColorPicker && (
-        <InstanceColorPicker
-          position={instanceColorPickerPos}
+      {showInstanceColorMenu && (
+        <InstanceColorMenu
+          position={instanceColorMenuPos}
           sessionSchemes={sessionSchemes}
           selectedNotes={selectedNotes}
           highlightScheme={
@@ -2392,14 +2426,16 @@ setPositionModeValue(null);
               return activeTrack?.activeInstanceScheme ?? null;
             })()
           }
-          onClose={() => setShowInstanceColorPicker(false)}
+          onClose={() => setShowInstanceColorMenu(false)}
           onApply={(schemeName) => {
             if (selectedNotes.size > 0) {
               setNotes(prev => prev.map((n, i) => selectedNotes.has(i) ? { ...n, instanceSchemeName: schemeName } : n));
             } else {
               setTracksTracked(prev => prev.map(t => t.id === activeTrackId ? { ...t, activeInstanceScheme: schemeName } : t));
             }
-            setShowInstanceColorPicker(false);
+            if (selectingSchemeClosesMenu) {
+              setShowInstanceColorMenu(false);
+            }
           }}
         />
       )}
@@ -2407,7 +2443,7 @@ setPositionModeValue(null);
   );
 }
 
-function InstanceColorPicker({ position, sessionSchemes, selectedNotes, highlightScheme, onClose, onApply }) {
+function InstanceColorMenu({ position, sessionSchemes, selectedNotes, highlightScheme, onClose, onApply }) {
   const schemes = { ...sessionSchemes };
   try {
     const saved = JSON.parse(localStorage.getItem('guitar-roll-color-schemes') || '{}');
@@ -2434,7 +2470,7 @@ function InstanceColorPicker({ position, sessionSchemes, selectedNotes, highligh
         focusedIndexRef.current = next;
         setFocusedIndex(next);
         setTimeout(() => {
-          const btn = containerRef.current?.querySelector('.instance-color-picker-focused');
+          const btn = containerRef.current?.querySelector('.instance-color-button-navigate-style');
           btn?.scrollIntoView({ block: 'nearest' });
         }, 0);
       } else if (e.key === 'Enter') {
@@ -2452,33 +2488,34 @@ function InstanceColorPicker({ position, sessionSchemes, selectedNotes, highligh
     };
   }, [onClose, schemeNames.length, onApply]);
   useEffect(() => {
-    const btn = containerRef.current?.querySelector('.instance-color-picker-highlighted');
+    const btn = containerRef.current?.querySelector('.selected-instance-color-button');
     btn?.scrollIntoView({ block: 'nearest' });
   }, [highlightScheme]);
   const getPreviewColors = (name) => {
     const sc = schemes[name];
     if (!sc) return [];
     const notes = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
-    return notes.map(n => sc[n]).filter(Boolean).slice(0, 6);
+    return notes.map(n => sc[n]).filter(Boolean).slice(0, 12);
   };
-  const left = Math.min(position.x, window.innerWidth - 260);
-  const top = Math.min(position.y, window.innerHeight - 300);
+  const left = position.left !== null && position.left !== undefined ? Math.min(position.left, window.innerWidth - 260) : 'auto';
+  const right = position.right !== null && position.right !== undefined ? position.right : 'auto';
+  const top = Math.min(position.top, window.innerHeight - 300);
   return (
-    <div className="instance-color-picker-overlay" onClick={(e) => { if (e.target.classList.contains('instance-color-picker-overlay')) onClose(); }}>
-      <div ref={containerRef} className="instance-color-picker" style={{ position: 'absolute', left, top }}>
+    <div className="instance-color-menu-overlay" onClick={(e) => { if (e.target.classList.contains('instance-color-menu-overlay')) onClose(); }}>
+      <div ref={containerRef} className="instance-color-menu" style={{ position: 'absolute', left, top, right }}>
         <div style={{ color: '#fff', fontSize: 12, marginBottom: 6, fontWeight: 'bold' }}>
-          {selectedNotes.size > 0 ? 'Instance color for selected notes' : 'Instance color for new notes'}
+          {selectedNotes.size > 0 ? 'Instance color for selection' : 'Instance color for new notes'}
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <button className={`settings-btn-sm ${focusedIndex === 0 ? 'instance-color-picker-focused' : ''} ${highlightScheme === null ? 'instance-color-picker-highlighted' : ''}`} onClick={() => onApply(null)} style={{ textAlign: 'left' }}>None</button>
+          <button className={`settings-btn-sm ${focusedIndex === 0 ? 'instance-color-button-navigate-style' : ''} ${highlightScheme === null ? 'selected-instance-color-button' : ''}`} onClick={() => onApply(null)} style={{ textAlign: 'left' }}>None</button>
           {schemeNames.map((name, i) => (
-            <button key={name} className={`settings-btn-sm ${focusedIndex === i + 1 ? 'instance-color-picker-focused' : ''} ${highlightScheme === name ? 'instance-color-picker-highlighted' : ''}`} onClick={() => onApply(name)} style={{ textAlign: 'left', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
-              <div className="scheme-colors-preview" style={{ display: 'flex', gap: 2 }}>
+            <button key={name} className={`settings-btn-sm ${focusedIndex === i + 1 ? 'instance-color-button-navigate-style' : ''} ${highlightScheme === name ? 'selected-instance-color-button' : ''}`} onClick={() => onApply(name)} style={{ textAlign: 'left', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, maxWidth: '100%' }}>
+              <div className="scheme-colors-preview" style={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
                 {getPreviewColors(name).map((c, ci) => (
                   <div key={ci} className="scheme-color-dot" style={{ width: 10, height: 10, background: c, border: '1px solid #333' }} />
                 ))}
               </div>
-              <span style={{ fontSize: 11, color: '#ddd' }}>{name}</span>
+              <span style={{ fontSize: 11, color: '#ddd', wordBreak: 'break-word', maxWidth: '100%' }}>{name}</span>
             </button>
           ))}
         </div>
