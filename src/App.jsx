@@ -1,2527 +1,2715 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
-import Fretboard from './components/Fretboard';
-import Timeline from './components/Timeline';
-import { playNote, playNoteAtTime, playClickAtTime, getAudioContext, getMasterOut, getNoteName, INSTRUMENTS, getAllInstruments, setInstrument, getInstrument, saveCustomPreset } from './utils/audio';
-import { NUM_BARS, SUBDIVISIONS, BPM as DEFAULT_BPM } from './utils/constants';
-import { defaultBarSubdivisions, totalColumns, beatToBar, beatToTime, colDurationAtBeat, remapNotes, barStartBeats, applySwingBeat, amountToRatio, ratioToAmount } from './utils/barLayout';
-import { loadAudioFile, computeWaveformPeaks } from './utils/audioFile';
-import { ensureReady as ensureStretchReady, createStretchNode, setStretchTempo } from './utils/rubberbandStretch';
-import { putAudioFile, getAudioFile, deleteAudioFile } from './utils/audioStore';
-import { parseMidi, midiToGuitarNotes } from './utils/midiImport';
-import { stateFromUrl, saveChordLibrary, getSessionState, saveAutosave, loadAutosave, listColorSchemes, loadSessionSchemeState, saveSessionSchemeState } from './utils/storage';
-import { loadHotkeys, matchesHotkey, formatHotkey, REFERENCE_ACTIONS } from './utils/hotkeys';
-import { getMidiNote, closestComboForPitch, getComboForPosition } from './utils/pitchMap';
-import { NUM_STRINGS, NUM_FRETS } from './utils/constants';
-import SettingsModal from './components/SettingsModal';
-import TrackStrip from './components/TrackStrip';
-import SynthEditor from './components/SynthEditor';
-import ChordPalette from './components/ChordPalette';
-import VoiceLeadingModal from './components/VoiceLeadingModal';
-import ConfirmDialog from './components/ConfirmDialog';
-import NumberInput from './components/NumberInput';
-import './App.css';
-
-function createDefaultTrack(name = 'Track 1', instrument = 'clean-electric') {
-  return { id: crypto.randomUUID(), name, instrument, type: 'notes', notes: [], volume: 1, muted: false, solo: false, visible: true, bgOpacity: 0.2, schemeName: null, activeInstanceScheme: null, audioFileName: null, audioDuration: 0, audioOffset: 0, waveformPeaks: null };
+.app {
+  display: flex;
+  height: 100vh;
+  height: 100dvh;
+  flex-direction: column;
 }
 
-function getPlayableTracks(tracks) {
-  const anySolo = tracks.some(t => t.solo);
-  return tracks.filter(t => {
-    if (t.muted) return false;
-    if (anySolo && !t.solo) return false;
-    return true;
-  });
+.toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #333;
+  background: #111;
+  flex-shrink: 0;
 }
 
-function App() {
-  // === Track state ===
-  const [tracks, setTracksRaw] = useState(() => [createDefaultTrack()]);
-  const tracksRef = useRef(tracks);
-  const audioBuffersRef = useRef({}); // { [trackId]: AudioBuffer } — original decoded
-  const audioSourcesRef = useRef([]); // active AudioBufferSourceNodes during playback
-  const [activeTrackId, setActiveTrackId] = useState(() => tracks[0]?.id);
-  const activeTrackIdRef = useRef(activeTrackId);
-  activeTrackIdRef.current = activeTrackId;
-
-  const setTracksTracked = useCallback((updater) => {
-    setTracksRaw(prev => {
-      const next = typeof updater === 'function' ? updater(prev) : updater;
-      tracksRef.current = next;
-      return next;
-    });
-  }, []);
-
-  // Derived: active track's notes
-  const activeTrack = tracks.find(t => t.id === activeTrackId) || tracks[0];
-  const notes = activeTrack ? activeTrack.notes : [];
-  const notesRef = useRef(notes);
-  notesRef.current = notes;
-  const activeScheme = activeTrack?.activeInstanceScheme ?? null;
-
-  // Helper: update only the active track's notes
-  const setActiveNotes = useCallback((updater) => {
-    setTracksTracked(prev => prev.map(t => {
-      if (t.id !== activeTrackIdRef.current) return t;
-      const newNotes = typeof updater === 'function' ? updater(t.notes) : updater;
-      return { ...t, notes: newNotes };
-    }));
-  }, [setTracksTracked]);
-
-  const undoStackRef = useRef([]);
-  const redoStackRef = useRef([]);
-  const autoForwardLastActionRef = useRef(false);
-
-  // Snapshot helpers for undo/redo
-  const takeSnapshot = useCallback(() => ({
-    tracks: JSON.parse(JSON.stringify(tracksRef.current)),
-    activeTrackId: activeTrackIdRef.current,
-    timeSignature: timeSigRef.current,
-    barSubdivisions: barSubsRef.current,
-    selectedBeat: selectedBeatRef.current,
-    selectedNotes: [...selectedNotesRef.current],    
-    autoForward: autoForwardLastActionRef.current,
-  }), []);
-
-  const restoreSnapshot = useCallback((snap) => {
-    // Legacy: plain array means notes-only snapshot
-    if (Array.isArray(snap)) {
-      setActiveNotes(() => snap);
-      return;
-    }
-    // Legacy: snapshot with .notes but no .tracks
-    if (snap.notes && !snap.tracks) {
-      setActiveNotes(() => snap.notes);
-      if (snap.timeSignature) setTimeSignature(snap.timeSignature);
-      if (snap.barSubdivisions) setBarSubdivisions(snap.barSubdivisions);
-      if (snap.selectedBeat !== undefined && snap.autoForward) setSelectedBeat(snap.selectedBeat);
-      if (snap.selectedNotes) setSelectedNotes(new Set(snap.selectedNotes));
-      return;
-    }
-    setTracksTracked(() => snap.tracks);
-    if (snap.activeTrackId) {
-      activeTrackIdRef.current = snap.activeTrackId;
-      setActiveTrackId(snap.activeTrackId);
-    }
-    if (snap.timeSignature) setTimeSignature(snap.timeSignature);
-    if (snap.barSubdivisions) setBarSubdivisions(snap.barSubdivisions);
-    if (snap.selectedBeat !== undefined && snap.autoForward) setSelectedBeat(snap.selectedBeat);
-    if (snap.selectedNotes) setSelectedNotes(new Set(snap.selectedNotes));
-  }, [setTracksTracked, setActiveNotes]);
-  
-  // setNotes: pushes undo, for one-shot operations
-  const setNotes = useCallback((updater) => {
-    undoStackRef.current.push(takeSnapshot());
-    if (undoStackRef.current.length > 200) undoStackRef.current.shift();
-    redoStackRef.current = [];
-    setActiveNotes(updater);
-  }, [setActiveNotes, takeSnapshot]);
-
-  // setNotesDrag: no undo push, for continuous drag updates
-  const setNotesDrag = useCallback((updater) => {
-    setActiveNotes(updater);
-  }, [setActiveNotes]);
-
-  // saveSnapshot: push undo once before a drag starts
-  const saveSnapshot = useCallback(() => {
-    undoStackRef.current.push(takeSnapshot());
-    if (undoStackRef.current.length > 200) undoStackRef.current.shift();
-    redoStackRef.current = [];
-  }, [takeSnapshot]);
-
-  // commitDrag: no-op
-  const commitDrag = useCallback(() => {}, []);
-
-  const undo = useCallback(() => {
-    if (undoStackRef.current.length === 0) return;
-    redoStackRef.current.push(takeSnapshot());
-    const prev = undoStackRef.current.pop();
-    restoreSnapshot(prev);
-  }, [takeSnapshot, restoreSnapshot]);
-
-  const redo = useCallback(() => {
-    if (redoStackRef.current.length === 0) return;
-    undoStackRef.current.push(takeSnapshot());
-    const next = redoStackRef.current.pop();
-    restoreSnapshot(next);
-  }, [takeSnapshot, restoreSnapshot]);
-
-  // Switch active track
-  const switchTrack = useCallback((trackId) => {
-    setActiveTrackId(trackId);
-    activeTrackIdRef.current = trackId;
-    setSelectedNotes(new Set());
-    const track = tracksRef.current.find(t => t.id === trackId);
-    if (track) {
-      setInstrument(track.instrument);
-      setInstrumentState(track.instrument);
-    }
-  }, []);
-  const [projectName, setProjectName] = useState('Guitar Roll');
-  const [playing, setPlaying] = useState(false);
-  const [currentBeat, setCurrentBeat] = useState(null);
-  // Imperative playhead ref — updated every audio frame, consumed by Timeline
-  // without going through React state so smooth motion survives slow renders.
-  const playheadBeatRef = useRef(null);
-  // Shared ref to the Timeline's scroll body so Fretboard drags can trigger its auto-pan.
-  const timelineBodyRef = useRef(null);
-  const lastMousePosRef = useRef({ x: 0, y: 0 });
-  useEffect(() => {
-    const handler = (e) => { lastMousePosRef.current = { x: e.clientX, y: e.clientY }; };
-    window.addEventListener('mousemove', handler);
-    return () => window.removeEventListener('mousemove', handler);
-  }, []);
-  const [selectedBeat, setSelectedBeat] = useState(0);
-  const [subdivisions, setSubdivisions] = useState(4); // how many subdivisions per beat
-  const [rhythmUnit, setRhythmUnit] = useState('beat'); // 'beat' | 'bar'
-  const [rhythmMult, setRhythmMult] = useState(1); // 1-32
-  const [xHeld, setXHeld] = useState(false);
-  const xHeldRef = useRef(false); // ref for synchronous X key access
-  // Position-system-style rhythm entry: buffer accumulates digits on keydown,
-  // commits on keyup (all keys released). Second digit allowed only if
-  // firstDigit * 10 <= max (e.g. subdiv max 32 → first digit 1-3 can extend;
-  // mult max 32 → first digit 1-3 can extend).
-  const rhythmBufRef = useRef({ kind: null, str: '' });
-  const rhythmKeysDownRef = useRef(new Set());
-  const rhythmPendingRef = useRef(null);
-  const [rhythmLiveValue, setRhythmLiveValue] = useState(null);
-  const [rhythmLiveKind, setRhythmLiveKind] = useState(null);
-  const RHYTHM_MAX_DIV = 32;
-  const RHYTHM_MAX_MULT = 32;
-  const RHYTHM_PENDING_WINDOW = 200;
-  // Whether changing the subdivision (÷) resets the multiplier (×) to 1.
-  const [resetMultOnSubdiv, setResetMultOnSubdiv] = useState(() => {
-    try {
-      const saved = localStorage.getItem('guitar-roll-reset-mult-on-subdiv');
-      return saved === null ? true : saved === 'true';
-    } catch { return true; }
-  });
-  const resetMultOnSubdivRef = useRef(resetMultOnSubdiv);
-  resetMultOnSubdivRef.current = resetMultOnSubdiv;
-  useEffect(() => {
-    try { localStorage.setItem('guitar-roll-reset-mult-on-subdiv', String(resetMultOnSubdiv)); } catch {}
-  }, [resetMultOnSubdiv]);
-  // Whether changing ÷ or × updates the duration of selected notes.
-  const [rhythmAltersSelected, setRhythmAltersSelected] = useState(() => {
-    try {
-      const saved = localStorage.getItem('guitar-roll-rhythm-alters-selected');
-      return saved === null ? true : saved === 'true';
-    } catch { return true; }
-  });
-  const rhythmAltersSelectedRef = useRef(rhythmAltersSelected);
-  rhythmAltersSelectedRef.current = rhythmAltersSelected;
-  useEffect(() => {
-    try { localStorage.setItem('guitar-roll-rhythm-alters-selected', String(rhythmAltersSelected)); } catch {}
-  }, [rhythmAltersSelected]);
-  const [selectingSchemeClosesMenu, setSelectingSchemeClosesMenu] = useState(() => {
-    try {
-      const saved = localStorage.getItem('guitar-roll-selecting-scheme-closes-menu');
-      return saved === null ? true : saved === 'true';
-    } catch { return true; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem('guitar-roll-selecting-scheme-closes-menu', String(selectingSchemeClosesMenu)); } catch {}
-  }, [selectingSchemeClosesMenu]);
-  const [timeSignature, setTimeSignature] = useState([4, 4]); // [numerator, denominator]
-  const unitBeats = rhythmUnit === 'bar' ? (timeSignature[0] || 4) : 1;
-  const baseSubdivBeats = unitBeats / subdivisions;
-  const effectiveNoteLength = baseSubdivBeats * rhythmMult;
-  const snapUnit = baseSubdivBeats; // grid snaps to base subdivision (not multiplied length)
-  const [noteDuration, setNoteDuration] = useState(effectiveNoteLength);
-  const noteDurationRef = useRef(effectiveNoteLength);
-  const snapUnitRef = useRef(snapUnit);
-  
-  // Keep refs in sync with derived values
-  useEffect(() => { noteDurationRef.current = effectiveNoteLength; }, [effectiveNoteLength]);
-  useEffect(() => { snapUnitRef.current = snapUnit; }, [snapUnit]);
-  
-  // Sync noteDuration state when effectiveNoteLength changes (e.g. rhythmUnit, rhythmMult, timeSignature)
-  // Use epsilon to avoid unnecessary updates that could cause render loops
-  useEffect(() => {
-    setNoteDuration(prev => Math.abs(prev - effectiveNoteLength) > 1e-6 ? effectiveNoteLength : prev);
-  }, [effectiveNoteLength]);
-  const [selectedNotes, setSelectedNotes] = useState(new Set());
-  const selectedNotesRef = useRef(selectedNotes);
-  selectedNotesRef.current = selectedNotes;
-  const [bpm, setBpm] = useState(DEFAULT_BPM);
-  const [swing, setSwing] = useState(50);
-  const swingRef = useRef(swing);
-  swingRef.current = swing;
-
-  // Live tempo on bpm change: BufferSource.playbackRate does the time-stretch, rubberband
-  // corrects the resulting pitch shift via pitch_scale. Update both so they track bpm.
-  useEffect(() => {
-    const entries = audioSourcesRef.current;
-    if (entries.length === 0) return;
-    entries.forEach((entry) => {
-      const track = tracksRef.current.find((t) => t.id === entry.trackId);
-      const originalBpm = (track?.originalBpm) || bpm;
-      const tempoMultiplier = bpm / originalBpm;
-      const pitchScale = 1 / tempoMultiplier;
-      try { entry.source?.playbackRate.setValueAtTime(tempoMultiplier, entry.source.context.currentTime); } catch {}
-      if (!entry.workletNode) {
-        console.info(`[rubberband] bpm→${bpm}: worklet not ready yet for track=${entry.trackId.slice(0,6)} (pitch_scale will be applied at splice)`);
-        return;
-      }
-      setStretchTempo(entry.workletNode, pitchScale);
-      console.info(`[rubberband] bpm→${bpm}: playbackRate=${tempoMultiplier.toFixed(3)} pitchScale=${pitchScale.toFixed(3)} track=${entry.trackId.slice(0,6)}`);
-    });
-  }, [bpm]);
-
-  const [metronome, setMetronome] = useState(false);
-  const clipboardRef = useRef([]);
-  const [instrument, setInstrumentState] = useState(getInstrument());
-  const [freeMode, setFreeMode] = useState(false);
-  const [machineGunMode, setMachineGunMode] = useState(false);
-  const [defaultVelocity, setDefaultVelocity] = useState(0.8);
-  const [hoverPreview, setHoverPreview] = useState(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem('guitar-roll-hover-preview'));
-      return { fretboard: false, pianoRoll: false, timelineNotes: false, volume: 0.3, ...saved };
-    } catch { return { fretboard: false, pianoRoll: false, timelineNotes: false, volume: 0.3 }; }
-  });
-  const [markers, setMarkers] = useState([]); // [{ id, name, beat, color }]
-  const markersRef = useRef(markers);
-  markersRef.current = markers;
-  const [tupletLines, setTupletLines] = useState(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem('guitar-roll-tuplet-lines'));
-      return { visible: false, opacity: 0.35, ...saved };
-    } catch { return { visible: false, opacity: 0.35 }; }
-  });
-  const [autoScroll, setAutoScroll] = useState(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem('guitar-roll-auto-scroll'));
-      return { onHover: false, onInput: false, onPlayback: false, ...saved };
-    } catch { return { onHover: false, onInput: false, onPlayback: false }; }
-  });
-  const [hoverPill, setHoverPill] = useState(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem('guitar-roll-hover-pill'));
-      return { fretboard: true, pianoRoll: false, ...saved };
-    } catch { return { fretboard: true, pianoRoll: false }; }
-  });
-  const [swungDisplay, setSwungDisplay] = useState(() => {
-    try {
-      const saved = localStorage.getItem('guitar-roll-swung-display');
-      return saved === null ? false : saved === 'true';
-    } catch { return false; }
-  });
-  const [fretboardAutoForward, setFretboardAutoForward] = useState(() => {
-    try {
-      const saved = localStorage.getItem('guitar-roll-fretboard-auto-forward');
-      return saved === null ? false : saved === 'true';
-    } catch { return false; }
-  });
-  const [fretboardAutoForwardExcludeAdjacent, setFretboardAutoForwardExcludeAdjacent] = useState(() => {
-    try {
-      const saved = localStorage.getItem('guitar-roll-fretboard-auto-forward-exclude-adjacent');
-      return saved === null ? true : saved === 'true';
-    } catch { return true; }
-  });
-  const [fingeringMode, setFingeringMode] = useState(false);
-  const fingeringModeRef = useRef(false);
-  const [timelineZoom, setTimelineZoom] = useState(1);
-  const [timelineVerticalZoom, setTimelineVerticalZoom] = useState(() => {
-    try {
-      const saved = parseFloat(localStorage.getItem('guitar-roll-timeline-vertical-zoom'));
-      return Number.isFinite(saved) && saved > 0 ? saved : 1;
-    } catch { return 1; }
-  });
-  const [showTimelineVerticalZoomButtons, setShowTimelineVerticalZoomButtons] = useState(() => {
-    try {
-      const saved = localStorage.getItem('guitar-roll-timeline-vzoom-buttons');
-      return saved === null ? true : saved === 'true';
-    } catch { return true; }
-  });
-  const [fretboardZoom, setFretboardZoom] = useState(1);
-  const [stringColors, setStringColors] = useState(['#ffffff', '#ffffff', '#ffffff', '#ffffff', '#ffffff', '#ffffff']);
-  const [showSettings, setShowSettings] = useState(false);
-  const showSettingsRef = useRef(showSettings);
-  showSettingsRef.current = showSettings;
-  const [hotkeys, setHotkeys] = useState(loadHotkeys);
-  const hotkeysRef = useRef(hotkeys);
-  hotkeysRef.current = hotkeys;
-  const [hoveredNote, setHoveredNote] = useState(null); // { stringIndex, fret }
-  const [chordRoot, setChordRoot] = useState(null); // { stringIndex, fret } — locked by click on piano key
-  const [showCheatSheet, setShowCheatSheet] = useState(false);
-  const [showSubdivDial, setShowSubdivDial] = useState(false);
-  const subdivDialRef = useRef(null);
-  const [showInstanceColorMenu, setShowInstanceColorMenu] = useState(false);
-  const instanceColorMenuRef = useRef(showInstanceColorMenu);
-  instanceColorMenuRef.current = showInstanceColorMenu;
-  const [instanceColorMenuPos, setInstanceColorMenuPos] = useState({ left: window.innerWidth / 2, top: window.innerHeight / 2, right: null });
-  const [showMultDial, setShowMultDial] = useState(false);
-  const multDialRef = useRef(null);
-  const [showSynthEditor, setShowSynthEditor] = useState(false);
-  const [chordPreview, setChordPreview] = useState(null);
-  const [chordPaletteOpen, setChordPaletteOpen] = useState(false);
-  const [showVoiceLeading, setShowVoiceLeading] = useState(false);
-  const [voicingPreview, setVoicingPreview] = useState(null); // [{ stringIndex, fret }] for fretboard highlight
-  const [confirmClear, setConfirmClear] = useState(false);
-  const [instrumentList, setInstrumentList] = useState(getAllInstruments);
-  const [verticalScroll, setVerticalScroll] = useState(0);
-  const [synesthesia, setSynesthesia] = useState([]); // [{ note: 'C', color: '#ff0000' }, ...]
-  const [sessionScheme, setSessionScheme] = useState(() => loadSessionSchemeState().sessionScheme || null);
-  const [sessionSchemes, setSessionSchemes] = useState(() => loadSessionSchemeState().sessionSchemes || {});
-  const [barSubdivisions, setBarSubdivisions] = useState(defaultBarSubdivisions);
-  const barSubsRef = useRef(barSubdivisions);
-  barSubsRef.current = barSubdivisions;
-  const [loop, setLoop] = useState(false);
-  const [loopStart, setLoopStart] = useState(0);
-  const [loopEnd, setLoopEnd] = useState(totalColumns(defaultBarSubdivisions()));
-  const playingRef = useRef(false);
-
-  useEffect(() => {
-    saveSessionSchemeState(sessionScheme, sessionSchemes);
-  }, [sessionScheme, sessionSchemes]);
-
-  useEffect(() => {
-    if (showInstanceColorMenu) {
-      setShowInstanceColorMenu(false);
-    }
-  }, [selectedNotes.size]);
-
-  const bpmRef = useRef(bpm);
-  const metronomeRef = useRef(metronome);
-  const loopRef = useRef(false);
-  const loopStartRef = useRef(0);
-  const loopEndRef = useRef(totalColumns(defaultBarSubdivisions()));
-  const selectedBeatRef = useRef(selectedBeat);
-  const animFrameRef = useRef(null);
-
-  const [position, setPosition] = useState(() => 0);
-  const positionRef = useRef(position);
-  positionRef.current = position;
-  const [playheadPreview, setPlayheadPreview] = useState(false);
-  const [positionMode, setPositionMode] = useState(false);
-  const positionModeRef = useRef(false);
-  positionModeRef.current = positionMode;
-  const [positionModeValue, setPositionModeValue] = useState(null);
-  const positionBufferRef = useRef([]);
-  const numberKeysDownRef = useRef(new Set());
-  const positionTimeoutRef = useRef(null);
-
-  const timeSigRef = useRef(timeSignature);
-
-  // Keep refs in sync
-  bpmRef.current = bpm;
-  metronomeRef.current = metronome;
-  timeSigRef.current = timeSignature;
-  selectedBeatRef.current = selectedBeat;
-  loopRef.current = loop;
-  loopStartRef.current = loopStart;
-  loopEndRef.current = loopEnd;
-
-  /*
-  // Auto-select notes at the playhead whenever it moves (not during playback).
-  useEffect(() => {
-    if (playing) return;
-    const beat = selectedBeat;
-    const atBeat = new Set();
-    const currentNotes = tracksRef.current.find(t => t.id === activeTrackIdRef.current)?.notes || [];
-    currentNotes.forEach((n, i) => {
-      if (beat >= n.beat && beat < n.beat + (n.duration || 1)) atBeat.add(i);
-    });
-    setSelectedNotes(atBeat);
-  }, [selectedBeat, playing]);
-  */
-
-  // Build synesthesia lookup: note letter (without octave) -> color
-  const synesthesiaMap = {};
-  synesthesia.forEach(s => { if (s.note) synesthesiaMap[s.note] = s.color; });
-
-  // Track schemes are resolved from session-local schemes first, then saved schemes.
-  const activeTrackScheme = activeTrack?.schemeName
-    ? (sessionSchemes?.[activeTrack.schemeName] || listColorSchemes()[activeTrack.schemeName] || null)
-    : null;
-
-  const getNoteColor = useCallback((stringIndexOrNote, fretOrMaybe, noteIndexOrMaybe) => {
-    let stringIndex, fret, note;
-    if (typeof stringIndexOrNote === 'object' && stringIndexOrNote !== null) {
-      stringIndex = stringIndexOrNote.stringIndex;
-      fret = stringIndexOrNote.fret;
-      note = stringIndexOrNote;
-    } else {
-      stringIndex = stringIndexOrNote;
-      fret = fretOrMaybe;
-      if (typeof noteIndexOrMaybe === 'number') {
-        note = notesRef.current[noteIndexOrMaybe];
-      }
-    }
-    const name = getNoteName(stringIndex, fret);
-    const letter = name.replace(/[0-9]/g, '');
-    if (note?.instanceSchemeName) {
-      const scheme = (sessionSchemes?.[note.instanceSchemeName] || listColorSchemes()[note.instanceSchemeName]) || null;
-      if (scheme && scheme[letter]) return scheme[letter];
-    }
-    if (activeTrackScheme && activeTrackScheme[letter]) return activeTrackScheme[letter];
-    if (sessionScheme?.name) {
-      const gscheme = (sessionSchemes?.[sessionScheme.name] || listColorSchemes()[sessionScheme.name] || sessionScheme.colors || null);
-      if (gscheme && gscheme[letter]) return gscheme[letter];
-    } else if (sessionScheme?.colors && sessionScheme.colors[letter]) {
-      return sessionScheme.colors[letter];
-    }
-    if (synesthesiaMap[letter]) return synesthesiaMap[letter];
-    return stringColors[stringIndex];
-  }, [stringColors, synesthesia, activeTrackScheme, sessionSchemes, sessionScheme]);
-
-  // Apply partial state from settings/load/URL
-  const applyState = useCallback((data) => {
-    setPosition(0);  // reset position on any new session load or import
-    if (data.tracks !== undefined) {
-      setTracksTracked(data.tracks);
-      const firstId = data.tracks[0]?.id;
-      if (firstId) { setActiveTrackId(firstId); activeTrackIdRef.current = firstId; }
-      // Rehydrate persisted audio files from IndexedDB
-      data.tracks.forEach(async (t) => {
-        if (t.type === 'audio' && t.audioFileName && !audioBuffersRef.current[t.id]) {
-          try {
-            const stored = await getAudioFile(t.id);
-            if (!stored) return;
-            const ctx = getAudioContext();
-            ensureStretchReady(ctx).catch(() => {});
-            const buffer = await ctx.decodeAudioData(stored.arrayBuffer.slice(0));
-            audioBuffersRef.current[t.id] = buffer;
-            // Back-fill originalBpm for legacy tracks that predate the tempo-stretch feature.
-            setTracksTracked(prev => prev.map(tr => tr.id === t.id
-              ? (tr.originalBpm ? { ...tr } : { ...tr, originalBpm: bpmRef.current })
-              : tr));
-          } catch (e) {
-            console.warn('Could not restore audio for track', t.id, e);
-          }
-        }
-      });
-    } else if (data.notes !== undefined) {
-      // Legacy: wrap flat notes into a single track
-      setTracksTracked(prev => {
-        const track = prev[0] || createDefaultTrack();
-        return [{ ...track, notes: data.notes }];
-      });
-    }
-    if (data.bpm !== undefined) setBpm(data.bpm);
-    if (data.swing !== undefined) setSwing(data.swing);
-    if (data.loop !== undefined) setLoop(data.loop);
-    if (data.loopStart !== undefined) setLoopStart(data.loopStart);
-    if (data.loopEnd !== undefined) setLoopEnd(data.loopEnd);
-    if (data.stringColors !== undefined) setStringColors(data.stringColors);
-    if (data.synesthesia !== undefined) setSynesthesia(data.synesthesia);
-    if (data.subdivisions !== undefined) {
-      setSubdivisions(data.subdivisions);
-      setRhythmMult(1);
-      // noteDuration is now derived from effectiveNoteLength
-    }
-    if (data.rhythmUnit !== undefined) setRhythmUnit(data.rhythmUnit);
-    if (data.rhythmMult !== undefined) setRhythmMult(data.rhythmMult);
-    if (data.markers !== undefined) setMarkers(data.markers);
-    if (data.metronome !== undefined) setMetronome(data.metronome);
-    if (data.sessionSchemes !== undefined) {
-      setSessionSchemes(data.sessionSchemes || {});
-    } else if (data.colorSchemes !== undefined) {
-      setSessionSchemes(data.colorSchemes || {});
-    }
-    const globalScheme = data.globalScheme !== undefined
-      ? data.globalScheme
-      : data.sessionScheme !== undefined
-        ? data.sessionScheme
-        : data.activeColorScheme;
-
-    if (globalScheme !== undefined) {
-      setSessionScheme(globalScheme);
-      if (globalScheme?.name && globalScheme?.colors) {
-        setSessionSchemes(prev => ({ ...prev, [globalScheme.name]: globalScheme.colors }));
-      }
-    }
-    if (data.barSubdivisions !== undefined) setBarSubdivisions(data.barSubdivisions);
-    if (data.timeSignature !== undefined) setTimeSignature(data.timeSignature);
-    if (data.projectName !== undefined) setProjectName(data.projectName);
-    if (data.synthPresets) {
-      Object.entries(data.synthPresets).forEach(([id, preset]) => {
-        saveCustomPreset(id, preset);
-      });
-      setInstrumentList(getAllInstruments());
-    }
-    if (data.chordLibrary) {
-      saveChordLibrary(data.chordLibrary);
-    }
-  }, [setTracksTracked]);
-
-  // Close subdiv dial on outside click
-  useEffect(() => {
-    if (!showSubdivDial) return;
-    const handleClick = (e) => {
-      if (subdivDialRef.current && !subdivDialRef.current.contains(e.target)) {
-        setShowSubdivDial(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [showSubdivDial]);
-
-  // Close mult dial on outside click
-  useEffect(() => {
-    if (!showMultDial) return;
-    const handleClick = (e) => {
-      if (multDialRef.current && !multDialRef.current.contains(e.target)) {
-        setShowMultDial(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [showMultDial]);
-
-  // Load from URL or autosave on mount
-  useEffect(() => {
-    const urlState = stateFromUrl();
-    if (urlState) {
-      applyState(urlState);
-      window.history.replaceState(null, '', window.location.pathname);
-    } else {
-      const auto = loadAutosave();
-      if (auto) {
-        const sessionSchemeState = loadSessionSchemeState();
-        applyState({
-          ...auto,
-          sessionScheme: sessionSchemeState.sessionScheme || null,
-          sessionSchemes: sessionSchemeState.sessionSchemes || {},
-        });
-      }
-    }
-  }, []);
-
-  // Handle share link opened in an already-running tab (only hash changes, no reload)
-  useEffect(() => {
-    const onHashChange = () => {
-      const urlState = stateFromUrl();
-      if (urlState) {
-        applyState(urlState);
-        window.history.replaceState(null, '', window.location.pathname);
-      }
-    };
-    window.addEventListener('hashchange', onHashChange);
-    return () => window.removeEventListener('hashchange', onHashChange);
-  }, [applyState]);
-
-  // Autosave toggle
-  const [autoSave, setAutoSave] = useState(() => {
-    try {
-      const saved = localStorage.getItem('guitar-roll-auto-save');
-      return saved !== null ? JSON.parse(saved) : true;
-    } catch { return true; }
-  });
-
-  // Autosave every 30 seconds
-  useEffect(() => {
-    if (!autoSave) return;
-    const interval = setInterval(() => {
-      const state = getSessionState({
-        tracks: tracksRef.current,
-        bpm, swing, loop, loopStart, loopEnd,
-        stringColors, synesthesia, sessionScheme, sessionSchemes,
-        projectName, subdivisions, metronome, barSubdivisions, timeSignature, markers,
-      });
-      saveAutosave(state);
-    }, 30000);
-    return () => clearInterval(interval);
-  }, [autoSave, bpm, swing, loop, loopStart, loopEnd, stringColors, synesthesia, sessionScheme, sessionSchemes, projectName, subdivisions, metronome, barSubdivisions, timeSignature, markers]);
-
-  const totalBeats = totalColumns(barSubdivisions);
-  const handlePlayRef = useRef(null);
-  const handleSetSubdivisionsRef = useRef(null);
-  const handleSetRhythmMultRef = useRef(null);
-  const handleToggleSoloRef = useRef(null);
-  // Commit the rhythm entry buffer to the appropriate state value.
-  const commitRhythmEntry = useCallback(() => {
-    const buf = rhythmBufRef.current;
-    if (!buf.kind || buf.str === '') return;
-    const max = buf.kind === 'mult' ? RHYTHM_MAX_MULT : RHYTHM_MAX_DIV;
-    let num = parseInt(buf.str, 10);
-    if (!Number.isFinite(num) || num < 1) num = 1;
-    if (num > max) num = max;
-    if (buf.kind === 'mult') {
-      handleSetRhythmMultRef.current?.(num);
-    } else {
-      handleSetSubdivisionsRef.current?.(num);
-    }
-    rhythmBufRef.current = { kind: null, str: '' };
-    rhythmKeysDownRef.current.clear();
-    setRhythmLiveValue(null);
-    setRhythmLiveKind(null);
-  }, []);
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (e.target.tagName === 'INPUT') return;
-      const hk = hotkeysRef.current;
-
-      // Position selection mode: number keys accumulate position value
-      if (positionModeRef.current) {
-        if (e.key >= '0' && e.key <= '9') {
-          e.preventDefault();
-          if (positionTimeoutRef.current) {
-            clearTimeout(positionTimeoutRef.current);
-            positionTimeoutRef.current = null;
-          }
-          if (!numberKeysDownRef.current.has(e.key)) {
-            const canAdd =
-              positionBufferRef.current.length === 0 ||
-              (positionBufferRef.current.length === 1 &&
-              (positionBufferRef.current[0] === '1' || positionBufferRef.current[0] === '2'));
-            if (canAdd) {
-              numberKeysDownRef.current.add(e.key);
-              positionBufferRef.current.push(e.key);
-              setPositionModeValue(parseInt(positionBufferRef.current.join(''), 10));
-            }
-          }
-          return;
-        }
-        if (e.key === 'Backspace') {
-          e.preventDefault();
-          if (positionTimeoutRef.current) {
-            clearTimeout(positionTimeoutRef.current);
-            positionTimeoutRef.current = null;
-          }
-          positionBufferRef.current.pop();
-          setPositionModeValue(positionBufferRef.current.length > 0 ? parseInt(positionBufferRef.current.join(''), 10) : null);
-          return;
-        }
-        // This chunk makes it so that position mode can be canceled...
-        if (e.key === 'Escape' || matchesHotkey(e, hk.positionMode)) {
-          e.preventDefault();
-          if (positionTimeoutRef.current) {
-            clearTimeout(positionTimeoutRef.current);
-            positionTimeoutRef.current = null;
-          }
-          setPositionMode(false);
-          positionModeRef.current = false;
-          positionBufferRef.current = [];
-setPositionModeValue(null);
-        numberKeysDownRef.current.clear();
-        return;
-      }       
-      // ...with Esc or the Position mode Hot key 
-      return;
-    }
-
-    // X key held as modifier for multiplier input
-    if (e.code === 'KeyX' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
-      e.preventDefault();
-      if (!xHeldRef.current) {
-        xHeldRef.current = true;
-        setXHeld(true);
-      }
-      return;
-    }
-
-    // Enter position mode on P
-    if (matchesHotkey(e, hk.positionMode)) {
-      e.preventDefault();
-      setPositionMode(true);
-      positionModeRef.current = true;
-      positionBufferRef.current = [];
-      setPositionModeValue(null);
-      numberKeysDownRef.current.clear();
-      return;
-    }
-
-    // Number keys 1-9: set subdivision (default) or multiplier (when X held)
-    // Position-system-style: buffer accumulates on keydown, commits on keyup.
-    // A second digit is allowed only when firstDigit * 10 <= max.
-    if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key >= '1' && e.key <= '9') {
-      if (positionModeRef.current) {
-        // Position mode handles its own number keys
-      } else {
-        e.preventDefault();
-        if (e.repeat) return;
-        // Clear any pending single-digit commit — a new keydown extends/cancels it
-        if (rhythmPendingRef.current) {
-          clearTimeout(rhythmPendingRef.current);
-          rhythmPendingRef.current = null;
-        }
-        const digit = Number(e.key);
-        const buf = rhythmBufRef.current;
-        // Kind is fixed by the first digit of the buffer; X only sets it when
-        // the buffer is empty.
-        const kind = buf.kind || (xHeldRef.current ? 'mult' : 'div');
-        const max = kind === 'mult' ? RHYTHM_MAX_MULT : RHYTHM_MAX_DIV;
-        const bufEmpty = buf.str === '';
-        const firstDigit = bufEmpty ? digit : Number(buf.str[0]);
-        // Allow: empty buffer, or single digit that can still be extended
-        const canAdd = bufEmpty || (buf.str.length === 1 && firstDigit * 10 <= max);
-        if (canAdd) {
-          rhythmKeysDownRef.current.add(e.key);
-          const newStr = bufEmpty ? String(digit) : buf.str + String(digit);
-          rhythmBufRef.current = { kind, str: newStr };
-          setRhythmLiveKind(kind);
-          setRhythmLiveValue(parseInt(newStr, 10));
-        }
-      }
-      return;
-    }
-
-      // Jump to previous/next note (configurable hotkey)
-      if (matchesHotkey(e, hk.jumpPrevNote) || matchesHotkey(e, hk.jumpNextNote)) {
-        e.preventDefault();
-        e.stopPropagation();
-        const currentNotes = notesRef.current;
-        if (currentNotes.length === 0) return;
-        const beats = [...new Set(currentNotes.map(n => n.beat))].sort((a, c) => a - c);
-        if (matchesHotkey(e, hk.jumpPrevNote)) {
-          setSelectedBeat(b => {
-            const prev = beats.filter(beat => beat < b - 0.001);
-            return prev.length > 0 ? prev[prev.length - 1] : b;
-          });
-        } else {
-          setSelectedBeat(b => {
-            const next = beats.filter(beat => beat > b + 0.001);
-            return next.length > 0 ? next[0] : b;
-          });
-        }
-        return;
-      }
-      if (matchesHotkey(e, hk.prevBeat)) {
-        e.preventDefault();
-        const step = noteDurationRef.current;
-        const snap = snapUnitRef.current;
-        setSelectedBeat(b => {
-          const next = Math.max(0, b - step);
-          return next <= 0 ? 0 : Math.round(next / snap) * snap;
-        });
-      }
-      if (matchesHotkey(e, hk.nextBeat)) {
-        e.preventDefault();
-        const step = noteDurationRef.current;
-        const snap = snapUnitRef.current;
-        setSelectedBeat(b => {
-          const next = Math.min(totalBeats - 1, b + step);
-          return next >= totalBeats - 1 ? totalBeats - 1 : Math.round(next / snap) * snap;
-        });
-      }
-      if (matchesHotkey(e, hk.returnToStart) && !instanceColorMenuRef.current) {
-        e.preventDefault();
-        setSelectedBeat(0);
-      }
-      if (matchesHotkey(e, hk.prevMarker)) {
-        e.preventDefault();
-        setSelectedBeat(b => {
-          const sorted = [...markersRef.current].sort((a, c) => a.beat - c.beat);
-          const prev = sorted.filter(m => m.beat < b);
-          return prev.length > 0 ? prev[prev.length - 1].beat : b;
-        });
-      }
-      if (matchesHotkey(e, hk.nextMarker)) {
-        e.preventDefault();
-        setSelectedBeat(b => {
-          const sorted = [...markersRef.current].sort((a, c) => a.beat - c.beat);
-          const next = sorted.filter(m => m.beat > b);
-          return next.length > 0 ? next[0].beat : b;
-        });
-      }
-      if (matchesHotkey(e, hk.playStop)) {
-        e.preventDefault();
-        handlePlayRef.current();
-      }
-      if (matchesHotkey(e, hk.undo)) {
-        e.preventDefault();
-        undo();
-      }
-      if (matchesHotkey(e, hk.redo) || matchesHotkey(e, hk.redoAlt)) {
-        e.preventDefault();
-        redo();
-      }
-      // Keyboard zoom: anchored at the playhead by the Timeline component (which captures
-      // the anchor before the state update commits). Shift modifier switches to vertical.
-      if (matchesHotkey(e, hk.verticalZoomIn) || ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === '+' || e.key === '='))) {
-        e.preventDefault();
-        window.dispatchEvent(new CustomEvent('timeline-vertical-zoom', { detail: { dir: 1 } }));
-      } else if (matchesHotkey(e, hk.verticalZoomOut) || ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === '-' || e.key === '_'))) {
-        e.preventDefault();
-        window.dispatchEvent(new CustomEvent('timeline-vertical-zoom', { detail: { dir: -1 } }));
-      } else if (matchesHotkey(e, hk.zoomIn) || ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === '+' || e.key === '='))) {
-        e.preventDefault();
-        window.dispatchEvent(new CustomEvent('timeline-zoom', { detail: { dir: 1 } }));
-      } else if (matchesHotkey(e, hk.zoomOut) || ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === '-' || e.key === '_'))) {
-        e.preventDefault();
-        window.dispatchEvent(new CustomEvent('timeline-zoom', { detail: { dir: -1 } }));
-      }
-      if (matchesHotkey(e, hk.freeMode)) {
-        setFreeMode(m => !m);
-      }
-      if (matchesHotkey(e, hk.machineGunMode) && selectedNotesRef.current.size === 0) {
-        setMachineGunMode(m => !m);
-      }
-      // Match by key character so shifted symbols like '?' work regardless of modifiers
-      if (e.key === hk.cheatSheet.key) {
-        setShowCheatSheet(s => !s);
-      }
-      if (matchesHotkey(e, hk.fingeringMode)) {
-        fingeringModeRef.current = !fingeringModeRef.current;
-        setFingeringMode(fingeringModeRef.current);
-      }
-      if (matchesHotkey(e, hk.rhythmUnit)) {
-        e.preventDefault();
-        setRhythmUnit(u => u === 'beat' ? 'bar' : 'beat');
-      }
-      if (matchesHotkey(e, hk.applyInstanceColor)) {
-        e.preventDefault();
-        if (showSettingsRef.current) return;
-        const next = !instanceColorMenuRef.current;
-        setShowInstanceColorMenu(next);
-        if (next) {
-          const body = timelineBodyRef.current;
-          const pos = lastMousePosRef.current;
-          let x = window.innerWidth / 2;
-          let y = window.innerHeight / 2;
-          if (body) {
-            const rect = body.getBoundingClientRect();
-            if (pos.x >= rect.left && pos.x <= rect.right && pos.y >= rect.top && pos.y <= rect.bottom) {
-              const midX = rect.left + rect.width / 2;
-              if (pos.x < midX) {
-                setInstanceColorMenuPos({ left: pos.x + 12, top: pos.y + 12, right: null });
-                return;
-              } else {
-                setInstanceColorMenuPos({ left: null, top: pos.y + 12, right: window.innerWidth - pos.x + 12 });
-                return;
-              }
-            }
-          }
-          setInstanceColorMenuPos({ left: x, top: y, right: null });
-        } else if (selectedNotesRef.current.size === 0) {
-          setTracksTracked(prev => prev.map(t => t.id === activeTrackId ? { ...t, activeInstanceScheme: null } : t));
-        }
-      }
-      if (matchesHotkey(e, hk.selectAtPlayhead)) {
-        e.preventDefault();
-        const beat = selectedBeatRef.current;
-        const atBeat = new Set();
-        notesRef.current.forEach((n, i) => {
-          if (beat >= n.beat && beat < n.beat + (n.duration || 1)) atBeat.add(i);
-        });
-        setSelectedNotes(atBeat);
-      }
-      
-      //Added event listener for the clear selections hotkey, which sets the selected note state to empty.
-      if (matchesHotkey(e, hk.clearSelection)) {
-        e.preventDefault();
-        setSelectedNotes(new Set());
-      }
-
-      //Event listener for Select-All hotkey
-      if (matchesHotkey(e, hk.selectAll)) {
-        e.preventDefault();
-        const all = new Set(notesRef.current.map((_, i) => i));
-        setSelectedNotes(all);
-      }
-
-      //Split-note handler...
-      if (matchesHotkey(e, hk.splitNote)) {
-        e.preventDefault();
-        const beat = selectedBeatRef.current;
-        const currentNotes = notesRef.current;
-        const selected = selectedNotesRef.current;
-        const targets = selected.size > 0
-          ? [...selected].filter(i => i < currentNotes.length)
-          : currentNotes.map((_, i) => i);
-
-        const newNotes = [];
-        const newSelected = new Set();
-
-        currentNotes.forEach((note, i) => {
-          if (!targets.includes(i)) {
-            newNotes.push(note);
-            return;
-          }
-
-          const start = note.beat;
-          const end = note.beat + (note.duration || 1);
-          if (beat > start + 0.001 && beat < end - 0.001) {
-            const leftDur = beat - start;
-            const rightDur = end - beat;
-            const leftNote = { ...note, duration: leftDur };
-            const rightNote = { ...note, beat: beat, duration: rightDur };
-            newNotes.push(leftNote, rightNote);
-            newSelected.add(newNotes.length - 2);
-            newSelected.add(newNotes.length - 1);
-          } else {
-            newNotes.push(note);
-          }
-        });
-
-        if (newNotes.length !== currentNotes.length) {
-          setNotes(newNotes);
-          setSelectedNotes(newSelected);
-        }
-      }    // ...end of split-note handler
-      
-      if (matchesHotkey(e, hk.deleteNotes) || matchesHotkey(e, hk.deleteNotesAlt)) {
-        if (selectedNotesRef.current.size > 0) {
-          e.preventDefault();
-          setNotes(prev => prev.filter((_, i) => !selectedNotesRef.current.has(i)));
-          setSelectedNotes(new Set());
-        }
-      }
-      if (matchesHotkey(e, hk.toggleGhost)) {
-        if (selectedNotesRef.current.size > 0) {
-          e.preventDefault();
-          setNotes(prev => prev.map((n, i) =>
-            selectedNotesRef.current.has(i) ? { ...n, ghost: !n.ghost } : n
-          ));
-        }
-      }
-      
-      // Transpose selected notes via configurable hotkeys.
-      let transposeHandled = false;
-      const isSemiUp = matchesHotkey(e, hk.transposeSemiUp);
-      const isSemiDown = matchesHotkey(e, hk.transposeSemiDown);
-      const isOctUp = matchesHotkey(e, hk.transposeOctaveUp);
-      const isOctDown = matchesHotkey(e, hk.transposeOctaveDown);
-      if ((isSemiUp || isSemiDown || isOctUp || isOctDown) && selectedNotesRef.current.size > 0) {
-        e.preventDefault();
-        transposeHandled = true;
-        const step = (isOctUp || isOctDown) ? 12 : 1;
-        const delta = (isSemiUp || isOctUp) ? step : -step;
-        setNotes(prev => prev.map((n, i) => {
-          if (!selectedNotesRef.current.has(i)) return n;
-          const newMidi = getMidiNote(n.stringIndex, n.fret) + delta;
-          const combo = closestComboForPitch(newMidi, n.stringIndex);
-          if (!combo) return n;
-          return { ...n, stringIndex: combo.stringIndex, fret: combo.fret };
-        }));
-      }
-      if (!transposeHandled && matchesHotkey(e, hk.bendUp)) {
-        if (selectedNotesRef.current.size > 0) {
-          e.preventDefault();
-          setNotes(prev => prev.map((n, i) =>
-            selectedNotesRef.current.has(i) ? { ...n, bend: Math.min(3, (n.bend || 0) + 0.5) } : n
-          ));
-        }
-      }
-      if (!transposeHandled && matchesHotkey(e, hk.bendDown)) {
-        if (selectedNotesRef.current.size > 0) {
-          e.preventDefault();
-          setNotes(prev => prev.map((n, i) =>
-            selectedNotesRef.current.has(i) ? { ...n, bend: Math.max(0, (n.bend || 0) - 0.5) } : n
-          ));
-        }
-      }
-      /* Solo: hotkey solos only current track. If there's only 1
-      soloed track, using the hotkey on it un-solos that track */
-      if (matchesHotkey(e, hk.soloTrack)) {
-        e.preventDefault();
-        if (handleToggleSoloRef.current) handleToggleSoloRef.current();
-      }
-      if (matchesHotkey(e, hk.toggleSlide)) {
-        if (selectedNotesRef.current.size > 0) {
-          e.preventDefault();
-          setNotes(prev => prev.map((n, i) => {
-            if (!selectedNotesRef.current.has(i)) return n;
-            if (n.slideTo != null) return { ...n, slideTo: undefined };
-            // Find the next note on the same string after this one
-            const nextOnString = prev.filter(other =>
-              other.stringIndex === n.stringIndex && other.beat > n.beat
-            ).sort((a, b) => a.beat - b.beat)[0];
-            return { ...n, slideTo: nextOnString ? nextOnString.fret : Math.min(NUM_FRETS, n.fret + 2) };
-          }));
-        }
-      }
-      if (matchesHotkey(e, hk.voiceLeading)) {
-        e.preventDefault();
-        setShowVoiceLeading(true);
-      }
-      // Fingering: shift selected notes to an adjacent string, same pitch (only in fingering mode)
-      if (fingeringModeRef.current && (matchesHotkey(e, hk.stringUp) || matchesHotkey(e, hk.stringDown))) {
-        if (selectedNotesRef.current.size > 0) {
-          e.preventDefault();
-          const dir = matchesHotkey(e, hk.stringUp) ? 1 : -1;
-          const MAX_FRET_SPAN = 4;
-          setNotes(prev => {
-            // Collect selected notes with their indices
-            const selected = [];
-            prev.forEach((n, i) => {
-              if (selectedNotesRef.current.has(i)) selected.push({ note: n, idx: i });
-            });
-            // Sort by string in movement direction so we assign strings without conflicts
-            selected.sort((a, b) => dir * (a.note.stringIndex - b.note.stringIndex));
-
-            const usedStrings = new Set();
-            const placements = []; // { idx, stringIndex, fret }
-
-            for (const { note, idx } of selected) {
-              const midi = getMidiNote(note.stringIndex, note.fret);
-              let placed = false;
-              for (let step = 1; step < NUM_STRINGS; step++) {
-                const s = ((note.stringIndex + dir * step) % NUM_STRINGS + NUM_STRINGS) % NUM_STRINGS;
-                if (usedStrings.has(s)) continue;
-                const fret = midi - getMidiNote(s, 0);
-                if (fret < 0 || fret > NUM_FRETS) continue;
-                // Check fret span with already placed notes
-                const allFrets = placements.map(p => p.fret).concat(fret);
-                if (Math.max(...allFrets) - Math.min(...allFrets) > MAX_FRET_SPAN) continue;
-                placements.push({ idx, stringIndex: s, fret });
-                usedStrings.add(s);
-                placed = true;
-                break;
-              }
-              if (!placed) return prev; // abort entire move if any note can't be placed
-            }
-
-            const placementMap = new Map(placements.map(p => [p.idx, p]));
-            return prev.map((n, i) => {
-              const p = placementMap.get(i);
-              return p ? { ...n, stringIndex: p.stringIndex, fret: p.fret } : n;
-            });
-          });
-        }
-      }
-      if (matchesHotkey(e, hk.copy)) {
-        e.preventDefault();
-        if (selectedNotesRef.current.size > 0) {
-          const selected = notesRef.current.filter((_, i) => selectedNotesRef.current.has(i));
-          const minBeat = Math.min(...selected.map(n => n.beat));
-          clipboardRef.current = selected.map(n => ({ ...n, beat: n.beat - minBeat }));
-        }
-      }
-      if (matchesHotkey(e, hk.paste)) {
-        e.preventDefault();
-        if (clipboardRef.current.length > 0) {
-          const pasteAt = selectedBeatRef.current;
-          const newNotes = clipboardRef.current.map(n => ({ ...n, beat: n.beat + pasteAt }));
-          const baseIdx = notesRef.current.length;
-          setNotes(prev => [...prev, ...newNotes]);
-          setSelectedNotes(new Set(newNotes.map((_, i) => baseIdx + i)));
-        }
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    const handleKeyUp = (e) => {
-      if (e.code === 'KeyX') {
-        xHeldRef.current = false;
-        setXHeld(false);
-        return;
-      }
-      if (positionModeRef.current) {
-        if (e.key >= '0' && e.key <= '9') {
-          numberKeysDownRef.current.delete(e.key);
-          // Only arm timeout if all number keys are released AND buffer has exactly one digit of '1' or '2'
-          if (numberKeysDownRef.current.size === 0 && positionBufferRef.current.length === 1) {
-            const buffered = positionBufferRef.current[0];
-            if (buffered === '1' || buffered === '2') {
-              positionTimeoutRef.current = setTimeout(() => {
-                numberKeysDownRef.current.clear();
-                const pos = Math.min(NUM_FRETS, Math.max(0, parseInt(positionBufferRef.current.join(''), 10)));
-                setPosition(pos);
-                positionBufferRef.current = [];
-                setPositionModeValue(null);
-                setPositionMode(false);
-                positionModeRef.current = false;
-                positionTimeoutRef.current = null;
-              }, 1000); // 1 second grace window
-              return;
-            }
-          }
-          // Normal commit: all keys up and buffer has a complete number (or no timeout window applies)
-          if (numberKeysDownRef.current.size === 0 && positionTimeoutRef.current === null && positionBufferRef.current.length > 0) {
-            const pos = Math.min(NUM_FRETS, Math.max(0, parseInt(positionBufferRef.current.join(''), 10)));
-            setPosition(pos);
-            positionBufferRef.current = [];
-            setPositionModeValue(null);
-            setPositionMode(false);
-            positionModeRef.current = false;
-          }
-        }
-        return;
-      }
-      // Rhythm entry: commit on keyup when all rhythm keys are released
-      if (e.key >= '1' && e.key <= '9' && rhythmKeysDownRef.current.has(e.key)) {
-        rhythmKeysDownRef.current.delete(e.key);
-        if (rhythmKeysDownRef.current.size === 0 && rhythmBufRef.current.str !== '') {
-          const buf = rhythmBufRef.current;
-          const max = buf.kind === 'mult' ? RHYTHM_MAX_MULT : RHYTHM_MAX_DIV;
-          const firstDigit = Number(buf.str[0]);
-          // Single digit that can still be extended → arm a grace window in case
-          // a second digit arrives. Otherwise commit immediately.
-          if (buf.str.length === 1 && firstDigit * 10 <= max) {
-            rhythmPendingRef.current = setTimeout(() => {
-              commitRhythmEntry();
-              rhythmPendingRef.current = null;
-            }, RHYTHM_PENDING_WINDOW);
-          } else {
-            commitRhythmEntry();
-          }
-        }
-      }
-    };
-    window.addEventListener('keyup', handleKeyUp);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
-      if (positionTimeoutRef.current) clearTimeout(positionTimeoutRef.current);
-      if (rhythmPendingRef.current) clearTimeout(rhythmPendingRef.current);
-    };
-  }, [totalBeats, undo, redo, setNotes]);
-
-  const handleFretClick = useCallback((stringIndex, fret, stayInPlace = false) => {
-    const beat = Math.round(selectedBeat / snapUnit) * snapUnit;
-    const exactMatch = notes.findIndex(
-      n => n.stringIndex === stringIndex && n.fret === fret && Math.abs(n.beat - beat) < 0.001
-    );
-    const willAutoForward = exactMatch < 0 && fretboardAutoForward !== stayInPlace;
-      if (willAutoForward) {
-        autoForwardLastActionRef.current = true;
-      }
-    setNotes(prev => {
-      if (exactMatch >= 0) {
-        return prev.filter((_, i) => i !== exactMatch);
-      }
-      const filtered = prev.filter(
-        n => !(n.stringIndex === stringIndex && Math.abs(n.beat - beat) < 0.001)
-      );
-      return [...filtered, { stringIndex, fret, beat, duration: effectiveNoteLength, velocity: defaultVelocity, instanceSchemeName: activeTrack?.activeInstanceScheme ?? null }];
-    });
-    // Only advance playhead when adding a note, not when erasing
-    if (willAutoForward) {
-      setSelectedBeat(b => {
-        const next = Math.min(totalBeats - 1, b + effectiveNoteLength);
-        return next >= totalBeats - 1 ? totalBeats - 1 : Math.round(next / snapUnit) * snapUnit;
-      });
-      autoForwardLastActionRef.current = false;
-    }
-  }, [selectedBeat, effectiveNoteLength, snapUnit, totalBeats, defaultVelocity, fretboardAutoForward, notes, activeScheme]);
-  const handleAdjacentClick = useCallback((stringIndex, fret, stayInPlace = false) => {
-    const beat = Math.round(selectedBeat / snapUnit) * snapUnit;
-    const exactMatch = notes.findIndex(
-      n => n.stringIndex === stringIndex && n.fret === fret && Math.abs(n.beat - beat) < 0.001
-    );
-    const willAutoForward = fretboardAutoForward && stayInPlace === fretboardAutoForwardExcludeAdjacent && exactMatch < 0;
-    if (willAutoForward) {
-      autoForwardLastActionRef.current = true;
-    }
-    setNotes(prev => {
-      const idx = prev.findIndex(
-        n => n.stringIndex === stringIndex && n.fret === fret && Math.abs(n.beat - beat) < 0.001
-      );
-      if (idx >= 0) {
-        return prev.filter((_, i) => i !== idx);
-      }
-      return [...prev, { stringIndex, fret, beat, duration: effectiveNoteLength, velocity: defaultVelocity, instanceSchemeName: activeScheme }];
-    });
-    if (willAutoForward) {
-      setSelectedBeat(b => {
-        const next = Math.min(totalBeats - 1, b + effectiveNoteLength);
-        return next >= totalBeats - 1 ? totalBeats - 1 : Math.round(next / snapUnit) * snapUnit;
-      });
-      autoForwardLastActionRef.current = false;
-    }
-  }, [selectedBeat, effectiveNoteLength, snapUnit, totalBeats, defaultVelocity, fretboardAutoForward, fretboardAutoForwardExcludeAdjacent, notes, activeScheme]);
-
-  const handleMoveNote = useCallback((fromString, fromFret, toString, toFret) => {
-    setNotes(prev => {
-      const idx = prev.findIndex(
-        n => n.stringIndex === fromString && n.fret === fromFret && n.beat === selectedBeat
-      );
-      if (idx < 0) return prev;
-      // Remove any existing note at the destination on the same beat
-      const filtered = prev.filter(
-        (n, i) => i === idx || !(n.stringIndex === toString && n.beat === selectedBeat)
-      );
-      return filtered.map((n, i) =>
-        n === prev[idx] ? { ...n, stringIndex: toString, fret: toFret } : n
-      );
-    });
-  }, [selectedBeat]);
-
-  const handleSetSubdivisions = useCallback((subs) => {
-    setSubdivisions(subs);
-    const newMult = resetMultOnSubdivRef.current ? 1 : rhythmMult;
-    if (resetMultOnSubdivRef.current) setRhythmMult(1);
-    // noteDuration is now derived from effectiveNoteLength
-    if (rhythmAltersSelectedRef.current && selectedNotes.size > 0) {
-      const dur = (unitBeats / subs) * newMult;
-      setNotes(prev => prev.map((n, i) =>
-        selectedNotes.has(i) ? { ...n, duration: dur } : n
-      ));
-    }
-  }, [selectedNotes, rhythmMult, unitBeats]);
-  handleSetSubdivisionsRef.current = handleSetSubdivisions;
-
-  const handleSetRhythmMult = useCallback((mult) => {
-    setRhythmMult(mult);
-    if (rhythmAltersSelectedRef.current && selectedNotes.size > 0) {
-      const dur = baseSubdivBeats * mult;
-      setNotes(prev => prev.map((n, i) =>
-        selectedNotes.has(i) ? { ...n, duration: dur } : n
-      ));
-    }
-  }, [selectedNotes, baseSubdivBeats]);
-  handleSetRhythmMultRef.current = handleSetRhythmMult;
-
-
-  const handleNoteDurationChange = useCallback((stringIndex, fret, newDuration) => {
-    setNotesDrag(prev => prev.map(n =>
-      n.stringIndex === stringIndex && n.fret === fret && n.beat === selectedBeat
-        ? { ...n, duration: newDuration }
-        : n
-    ));
-  }, [selectedBeat, setNotesDrag]);
-
-  const handleBeatChange = useCallback((stringIndex, fret, fromBeat, toBeat) => {
-    setNotesDrag(prev => prev.map(n =>
-      n.stringIndex === stringIndex && n.fret === fret && n.beat === fromBeat
-        ? { ...n, beat: toBeat }
-        : n
-    ));
-    setSelectedBeat(toBeat);
-  }, []);
-
-  const handleDeleteNote = useCallback((noteIndex) => {
-    setNotes(prev => prev.filter((_, i) => i !== noteIndex));
-    setSelectedNotes(prev => {
-      const next = new Set();
-      for (const idx of prev) {
-        if (idx < noteIndex) next.add(idx);
-        else if (idx > noteIndex) next.add(idx - 1);
-      }
-      return next;
-    });
-  }, []);
-
-  const stopPlayback = useCallback(() => {
-    playingRef.current = false;
-    setPlaying(false);
-    setCurrentBeat(null);
-    playheadBeatRef.current = null;
-    if (animFrameRef.current) {
-      cancelAnimationFrame(animFrameRef.current);
-    }
-    // Stop audio file sources and tear down any rubberband worklet nodes.
-    audioSourcesRef.current.forEach(({ source, gainNode, workletNode }) => {
-      try { source.stop(); } catch {}
-      try { source.disconnect(); } catch {}
-      try { workletNode?.disconnect(); } catch {}
-      try { gainNode?.disconnect(); } catch {}
-    });
-    audioSourcesRef.current = [];
-  }, []);
-
-  const scheduleAudioTracks = useCallback((playable, fromBeat, startTime, ctx, barSubs) => {
-    audioSourcesRef.current.forEach(({ source, gainNode, workletNode }) => {
-      try { source.stop(); } catch {}
-      try { source.disconnect(); } catch {}
-      try { workletNode?.disconnect(); } catch {}
-      try { gainNode?.disconnect(); } catch {}
-    });
-    audioSourcesRef.current = [];
-
-    const liveBpm = bpmRef.current;
-    const denom = timeSigRef.current[1];
-
-    playable.forEach(track => {
-      if (track.type !== 'audio') return;
-      const buffer = audioBuffersRef.current[track.id];
-      if (!buffer) return;
-
-      const originalBpm = track.originalBpm || liveBpm;
-      const tempoMultiplier = liveBpm / originalBpm;
-      // The BufferSource itself does the time-stretch by resampling; rubberband then
-      // corrects the pitch shift. pitch_scale = 1/tempoMultiplier restores the original
-      // pitch.
-      const pitchScale = 1 / tempoMultiplier;
-
-      const source = ctx.createBufferSource();
-      source.buffer = buffer;
-      source.playbackRate.value = tempoMultiplier;
-      const gainNode = ctx.createGain();
-      gainNode.gain.setValueAtTime(track.muted ? 0 : track.volume, startTime);
-
-      // Build a per-track entry so the live-tempo effect can target it.
-      const entry = { source, gainNode, workletNode: null, trackId: track.id };
-      audioSourcesRef.current.push(entry);
-
-      // Route source → rubberband worklet → gain → destination. The worklet is created
-      // async, but the BufferSource can't wait for it (we need to schedule source.start
-      // against startTime in the audio timeline). We pre-connect source→gain synchronously
-      // so audio starts on time; once the worklet is ready, we splice it into the chain.
-      source.connect(gainNode);
-      gainNode.connect(ctx.destination);
-
-      createStretchNode(ctx, { numChannels: buffer.numberOfChannels, initialRatio: pitchScale })
-        .then(({ node, ready }) => {
-          if (!audioSourcesRef.current.includes(entry)) {
-            try { node.disconnect(); } catch {}
-            return;
-          }
-          entry.workletNode = node;
-          try { source.disconnect(); } catch {}
-          source.connect(node);
-          try { gainNode.disconnect(); } catch {}
-          node.connect(gainNode);
-          gainNode.connect(ctx.destination);
-          // bpm may have changed during async init — re-apply tempoMultiplier and
-          // pitch_scale so the splice lines up with the current bpm state.
-          const nowTempoMult = bpmRef.current / originalBpm;
-          const nowPitch = 1 / nowTempoMult;
-          try { source.playbackRate.setValueAtTime(nowTempoMult, ctx.currentTime); } catch {}
-          setStretchTempo(node, nowPitch);
-          console.info(`[rubberband] spliced in for track=${track.id.slice(0,6)}, playbackRate=${nowTempoMult.toFixed(3)} pitch=${nowPitch.toFixed(3)}`);
-          ready
-            .then(({ startDelaySamples }) => {
-              console.info(`[rubberband] ready track=${track.id.slice(0,6)} startDelay=${startDelaySamples} samples`);
-            })
-            .catch((err) => console.warn('[rubberband] init failed:', err));
-        })
-        .catch((err) => {
-          console.warn('[rubberband] could not create worklet node, falling back to direct playback:', err);
-        });
-
-      // Loop + start offset are computed in file-time (original-bpm seconds) because the
-      // BufferSource always plays at rate 1; rubberband does the tempo math downstream.
-      const audioStartBeat = track.audioOffset || 0;
-      const beatOffset = fromBeat - audioStartBeat;
-      const timeOffsetInBuffer = beatToTime(Math.max(0, beatOffset), barSubs, originalBpm, denom);
-
-      if (loopRef.current) {
-        const lsBeats = loopStartRef.current - audioStartBeat;
-        const leBeats = loopEndRef.current - audioStartBeat;
-        const lsSec = beatToTime(Math.max(0, lsBeats), barSubs, originalBpm, denom);
-        const leSec = beatToTime(Math.max(0, leBeats), barSubs, originalBpm, denom);
-        const clampedEnd = Math.min(buffer.duration, leSec);
-        if (clampedEnd > lsSec + 1e-4) {
-          source.loop = true;
-          source.loopStart = lsSec;
-          source.loopEnd = clampedEnd;
-        }
-      }
-
-      if (beatOffset >= 0) {
-        if (timeOffsetInBuffer < buffer.duration) {
-          source.start(startTime, timeOffsetInBuffer);
-        }
-      } else {
-        // Negative offset = audio starts after playback begins. Wall-clock delay measured
-        // against live tempo (not original) since it's a timeline-position gap.
-        const delay = beatToTime(-beatOffset, barSubs, liveBpm, denom);
-        source.start(startTime + delay, 0);
-      }
-    });
-  }, []);
-
-  const startPlayback = useCallback((fromBeat) => {
-    const playable = getPlayableTracks(tracksRef.current);
-    const hasContent = playable.some(t => t.notes.length > 0 || (t.type === 'audio' && audioBuffersRef.current[t.id]));
-    if (!hasContent) return;
-
-    const ctx = getAudioContext();
-    const isLoop = loopRef.current;
-    const barSubs = barSubsRef.current;
-    const totalCols = totalColumns(barSubs);
-    const regionStart = fromBeat;
-    const regionEnd = isLoop ? loopEndRef.current : totalCols;
-    const regionDuration = regionEnd - regionStart;
-
-    if (regionDuration <= 0) return;
-
-    playingRef.current = true;
-    setPlaying(true);
-
-    const initialStart = regionStart;
-    const startTime = ctx.currentTime + 0.05;
-
-    // Schedule audio file tracks
-    scheduleAudioTracks(playable, fromBeat, startTime, ctx, barSubs);
-    const lookahead = 0.1;
-    let nextBeatIndex = 0;
-    let nextBeatTime = startTime;
-    let prevRStart = initialStart;
-    let prevRDuration = regionDuration;
-    let firstPass = true; // use initialStart for the first pass, loop boundaries after
-
-    const animate = () => {
-      if (!playingRef.current) return;
-
-      const now = ctx.currentTime;
-      const bs = barSubsRef.current;
-      const bpm = bpmRef.current;
-      const tc = totalColumns(bs);
-
-      // Read live loop region — use initialStart on first pass
-      let rStart, rEnd;
-      if (firstPass) {
-        rStart = initialStart;
-        rEnd = loopRef.current ? loopEndRef.current : tc;
-      } else {
-        rStart = loopRef.current ? loopStartRef.current : initialStart;
-        rEnd = loopRef.current ? loopEndRef.current : tc;
-      }
-      const rDuration = rEnd - rStart;
-
-      if (rDuration <= 0) { stopPlayback(); return; }
-
-      // If loop region changed, adjust nextBeatIndex to stay in range
-      if (rStart !== prevRStart || rDuration !== prevRDuration) {
-        if (!firstPass) nextBeatIndex = nextBeatIndex % rDuration;
-        prevRStart = rStart;
-        prevRDuration = rDuration;
-      }
-
-      // Loop boundary: reached end of current region. Reset indexing so note scheduling
-      // continues from loopStart. Audio loops natively via source.loop, so no rescheduling.
-      if (loopRef.current && nextBeatIndex >= rDuration) {
-        firstPass = false;
-        nextBeatIndex -= rDuration;
-        prevRStart = loopStartRef.current;
-        prevRDuration = loopEndRef.current - loopStartRef.current;
-      }
-
-      // Compute current column's duration for playhead interpolation
-      const currentBeatAbs = rStart + (nextBeatIndex > 0 ? (nextBeatIndex - 1) % rDuration : 0);
-      const currentColDur = colDurationAtBeat(Math.min(currentBeatAbs, tc - 1), bs, bpm, timeSigRef.current[1]);
-      const beatsSinceLastScheduled = (now - (nextBeatTime - currentColDur)) / currentColDur;
-      const playheadBeatIndex = nextBeatIndex - 1 + Math.min(1, Math.max(0, beatsSinceLastScheduled));
-      const playheadBeat = rStart + (playheadBeatIndex % rDuration);
-
-      if (!loopRef.current && playheadBeatIndex >= rDuration) {
-        stopPlayback();
-        return;
-      }
-
-      playheadBeatRef.current = playheadBeat;
-      setCurrentBeat(playheadBeat);
-
-      // Schedule upcoming beats
-      const scheduleEnd = now + lookahead;
-      const currentPlayable = getPlayableTracks(tracksRef.current);
-
-      while (nextBeatTime <= scheduleEnd) {
-        if (!loopRef.current && nextBeatIndex >= rDuration) break;
-
-        const beatInRegion = nextBeatIndex % rDuration;
-        const beat = rStart + beatInRegion;
-        const colDur = colDurationAtBeat(Math.min(beat, tc - 1), bs, bpm, timeSigRef.current[1]);
-
-        currentPlayable.forEach(track => {
-          if (track.type === 'audio') return;
-          const swing = swingRef.current;
-          const swungBeat = applySwingBeat(beat, swing, 0.5);
-          track.notes.forEach(note => {
-            if (note.beat >= beat && note.beat < beat + 1) {
-              const swungNoteStart = applySwingBeat(note.beat, swing, 0.5);
-              const swungNoteEnd = applySwingBeat(note.beat + (note.duration || 1), swing, 0.5);
-              const offset = (swungNoteStart - swungBeat) * colDur;
-              const noteDur = Math.max(0.06, (swungNoteEnd - swungNoteStart) * colDur);
-              playNoteAtTime(note.stringIndex, note.fret, nextBeatTime + offset, noteDur, note.velocity ?? 0.8, track.instrument, track.volume, note);
-            }
-          });
-        });
-
-        // Metronome clicks every subdivision; downbeat on bar starts
-        if (metronomeRef.current) {
-          const bStarts = barStartBeats(bs);
-          const isDownbeat = bStarts.includes(beat);
-          playClickAtTime(nextBeatTime, isDownbeat);
-        }
-
-        nextBeatIndex++;
-        nextBeatTime += colDur;
-      }
-
-      animFrameRef.current = requestAnimationFrame(animate);
-    };
-
-    animFrameRef.current = requestAnimationFrame(animate);
-  }, [stopPlayback, scheduleAudioTracks]);
-
-  // Play button: from start of loop or start of timeline
-  const handlePlay = useCallback(() => {
-    if (playing) {
-      stopPlayback();
-      return;
-    }
-    const isLoop = loopRef.current;
-    startPlayback(isLoop ? loopStartRef.current : 0);
-  }, [playing, stopPlayback, startPlayback]);
-
-  // Spacebar: from playhead position
-  const handlePlayFromHead = useCallback(() => {
-    if (playing) {
-      stopPlayback();
-      return;
-    }
-    startPlayback(selectedBeatRef.current);
-  }, [playing, stopPlayback, startPlayback]);
-
-  handlePlayRef.current = handlePlayFromHead;
-
-  const handleClear = useCallback(() => {
-    setNotes([]);
-    setSelectedNotes(new Set());
-  }, []);
-
-  const handleStampChord = useCallback((chordNotes) => {
-    const beat = selectedBeat;
-    const newNotes = chordNotes.map(cn => ({
-      stringIndex: cn.stringIndex,
-      fret: cn.fret,
-      beat: beat + (cn.beatOffset || 0),
-      duration: cn.duration || noteDuration,
-      velocity: cn.velocity ?? defaultVelocity,
-    }));
-    setNotes(prev => {
-      // Remove existing notes at same string+beat positions
-      const removeKeys = new Set(newNotes.map(n => `${n.stringIndex}_${n.beat}`));
-      const filtered = prev.filter(n => !removeKeys.has(`${n.stringIndex}_${n.beat}`));
-      return [...filtered, ...newNotes];
-    });
-  }, [selectedBeat, noteDuration, defaultVelocity]);
-
-  // Track management
-  const handleAddTrack = useCallback(() => {
-    const num = tracksRef.current.length + 1;
-    const newTrack = createDefaultTrack(`Track ${num}`);
-    setTracksTracked(prev => [...prev, newTrack]);
-    switchTrack(newTrack.id);
-  }, [setTracksTracked, switchTrack]);
-
-  const handleDuplicateTrack = useCallback((trackId) => {
-    const source = tracksRef.current.find(t => t.id === trackId);
-    if (!source) return;
-    const newTrack = {
-      ...source,
-      id: crypto.randomUUID(),
-      name: source.name + ' (copy)',
-      notes: source.notes.map(n => ({ ...n })),
-    };
-    setTracksTracked(prev => {
-      const idx = prev.findIndex(t => t.id === trackId);
-      const next = [...prev];
-      next.splice(idx + 1, 0, newTrack);
-      return next;
-    });
-    switchTrack(newTrack.id);
-  }, [setTracksTracked, switchTrack]);
-
-  const handleReorderTracks = useCallback((fromIndex, toIndex) => {
-    setTracksTracked(prev => {
-      const next = [...prev];
-      const [moved] = next.splice(fromIndex, 1);
-      next.splice(toIndex, 0, moved);
-      return next;
-    });
-  }, [setTracksTracked]);
-
-  const handleDeleteTrack = useCallback((trackId) => {
-    setTracksTracked(prev => {
-      const filtered = prev.filter(t => t.id !== trackId);
-      // If deleting the last track, create a fresh empty one
-      const result = filtered.length > 0 ? filtered : [createDefaultTrack()];
-      if (activeTrackIdRef.current === trackId) {
-        const newActive = result[0].id;
-        activeTrackIdRef.current = newActive;
-        setActiveTrackId(newActive);
-        setSelectedNotes(new Set());
-        setInstrument(result[0].instrument);
-        setInstrumentState(result[0].instrument);
-      }
-      return result;
-    });
-  }, [setTracksTracked]);
-
-  const handleToggleMute = useCallback((trackId) => {
-    setTracksTracked(prev => prev.map(t =>
-      t.id === trackId ? { ...t, muted: !t.muted } : t
-    ));
-  }, [setTracksTracked]);
-
-  const handleToggleSolo = useCallback((trackId) => {
-    setTracksTracked(prev => prev.map(t =>
-      t.id === trackId ? { ...t, solo: !t.solo } : t
-    ));
-  }, [setTracksTracked]);
-
-  const handleToggleSoloActiveTrack = useCallback(() => {
-    setTracksTracked(prev => {
-      const target = prev.find(t => t.id === activeTrackIdRef.current);
-      if (!target) return prev;
-      // Unsolo when this track is already the only soloed track.
-      if (target.solo && prev.every(t => !t.solo || t.id === target.id)) {
-        return prev.map(t => (t.solo ? { ...t, solo: false } : t));
-      }
-      // Otherwise solo exclusively this track.
-      return prev.map(t => (t.id === target.id ? { ...t, solo: true } : (t.solo ? { ...t, solo: false } : t)));
-    });
-  }, [setTracksTracked]);
-
-  handleToggleSoloRef.current = handleToggleSoloActiveTrack;
-
-  const handleSetTrackVolume = useCallback((trackId, volume) => {
-    setTracksTracked(prev => prev.map(t =>
-      t.id === trackId ? { ...t, volume } : t
-    ));
-  }, [setTracksTracked]);
-
-  const handleRenameTrack = useCallback((trackId, name) => {
-    setTracksTracked(prev => prev.map(t =>
-      t.id === trackId ? { ...t, name } : t
-    ));
-  }, [setTracksTracked]);
-
-  const handleLoadAudio = useCallback(async (trackId, file) => {
-    try {
-      const arrayBuffer = await file.arrayBuffer();
-      // Persist raw bytes so audio survives reload
-      try {
-        await putAudioFile(trackId, arrayBuffer.slice(0), file.name, file.type);
-      } catch (e) {
-        console.warn('Could not persist audio file:', e);
-      }
-      const ctx = getAudioContext();
-      ensureStretchReady(ctx).catch(() => {});
-      const buffer = await ctx.decodeAudioData(arrayBuffer);
-      const peaks = computeWaveformPeaks(buffer, 2000);
-      audioBuffersRef.current[trackId] = buffer;
-      setTracksTracked(prev => prev.map(t =>
-        t.id === trackId ? {
-          ...t,
-          type: 'audio',
-          audioFileName: file.name,
-          audioDuration: buffer.duration,
-          audioOffset: 0,
-          originalBpm: bpmRef.current,
-          notes: [],
-          waveformPeaks: Array.from(peaks),
-        } : t
-      ));
-    } catch (err) {
-      alert('Failed to load audio file: ' + err.message);
-    }
-  }, [setTracksTracked]);
-
-  const handleRemoveAudio = useCallback((trackId) => {
-    delete audioBuffersRef.current[trackId];
-    deleteAudioFile(trackId).catch(() => {});
-    setTracksTracked(prev => prev.map(t =>
-      t.id === trackId ? {
-        ...t,
-        type: 'notes',
-        audioFileName: null,
-        audioDuration: 0,
-        audioOffset: 0,
-        waveformPeaks: null,
-      } : t
-    ));
-  }, [setTracksTracked]);
-
-  const handleImportMidi = useCallback(async (file) => {
-    try {
-      const arrayBuffer = await file.arrayBuffer();
-      const midi = parseMidi(arrayBuffer);
-      const { tracks: midiTracks, detectedBpm } = midiToGuitarNotes(midi, timeSignature[1]);
-
-      if (midiTracks.length === 0) {
-        alert('No playable guitar notes found in this MIDI file.\nNotes must be in the range E2–E6 (MIDI 40–88).');
-        return;
-      }
-
-      // Set detected BPM
-      if (detectedBpm > 0) setBpm(detectedBpm);
-
-      // Create tracks for each MIDI track
-      const newTracks = midiTracks.map(mt =>
-        ({ ...createDefaultTrack(mt.name), notes: mt.notes })
-      );
-
-      setTracksTracked(prev => [...prev, ...newTracks]);
-      switchTrack(newTracks[0].id);
-      setSelectedNotes(new Set());
-    } catch (err) {
-      alert('Failed to import MIDI file: ' + err.message);
-    }
-  }, [setTracksTracked, switchTrack, timeSignature]);
-
-  const handleToggleVisible = useCallback((trackId) => {
-    setTracksTracked(prev => prev.map(t =>
-      t.id === trackId ? { ...t, visible: t.visible === false ? true : false } : t
-    ));
-  }, [setTracksTracked]);
-
-  const handleSetBgOpacity = useCallback((trackId, opacity) => {
-    setTracksTracked(prev => prev.map(t =>
-      t.id === trackId ? { ...t, bgOpacity: opacity } : t
-    ));
-  }, [setTracksTracked]);
-
-  const handleSetTrackScheme = useCallback((trackId, schemeName) => {
-    setTracksTracked(prev => prev.map(t =>
-      t.id === trackId ? { ...t, schemeName } : t
-    ));
-  }, [setTracksTracked]);
-
-  // Marker management
-  const handleAddMarker = useCallback((beat) => {
-    setMarkers(prev => {
-      const newMarker = {
-        id: crypto.randomUUID(),
-        name: 'Marker',
-        beat,
-        color: '#3498db',
-      };
-      return [...prev, newMarker].sort((a, b) => a.beat - b.beat);
-    });
-  }, []);
-
-  const handleUpdateMarker = useCallback((id, updates) => {
-    setMarkers(prev => prev.map(m => m.id === id ? { ...m, ...updates } : m).sort((a, b) => a.beat - b.beat));
-  }, []);
-
-  const handleDeleteMarker = useCallback((id) => {
-    setMarkers(prev => prev.filter(m => m.id !== id));
-  }, []);
-
-  return (
-    <div className="app">
-      <div className="toolbar">
-        <input
-          className="project-name"
-          value={projectName}
-          onChange={(e) => setProjectName(e.target.value)}
-          spellCheck={false}
-        />
-        <button
-          className={`play-btn ${playing ? 'playing' : ''}`}
-          onClick={handlePlay}
-        >
-          {playing ? '⏹ Stop' : '▶ Play'}
-        </button>
-        <button
-          className={`tool-btn ${metronome ? 'active' : ''}`}
-          onClick={() => setMetronome(m => !m)}
-          title="Metronome"
-        >
-          Metronome
-        </button>
-        <span className="toolbar-label">Inst:</span>
-        <select
-          className="duration-select"
-          value={activeTrack?.instrument || instrument}
-          title="Instrument"
-          onChange={(e) => {
-            const inst = e.target.value;
-            setInstrument(inst);
-            setInstrumentState(inst);
-            setTracksTracked(prev => prev.map(t =>
-              t.id === activeTrackId ? { ...t, instrument: inst } : t
-            ));
-          }}
-        >
-          {Object.entries(instrumentList).map(([id, inst]) => (
-            <option key={id} value={id}>{inst.label}</option>
-          ))}
-        </select>
-        <button
-          className="tool-btn"
-          onClick={() => setShowSynthEditor(true)}
-          title="Edit synth parameters"
-        >
-          Synth
-        </button>
-        <button
-          className="tool-btn"
-          onClick={() => {
-            if (!confirm('Start a new session? Unsaved changes will be lost.')) return;
-            const track = createDefaultTrack();
-            applyState({
-              tracks: [track],
-              bpm: 120, swing: 50, loop: false, loopStart: 0, loopEnd: totalColumns(defaultBarSubdivisions()),
-              stringColors: ['#ffffff','#ffffff','#ffffff','#ffffff','#ffffff','#ffffff'],
-              synesthesia: [], sessionScheme: null, sessionSchemes: {},
-              subdivisions: 4, markers: [], metronome: false,
-              barSubdivisions: defaultBarSubdivisions(),
-              timeSignature: [4, 4], projectName: 'Untitled',
-            });
-            setSelectedBeat(0);
-            setSelectedNotes(new Set());
-            setNoteDuration(0.25);
-          }}
-          title="New Session"
-        >
-          New
-        </button>
-        <button
-          className="tool-btn"
-          onClick={() => {
-            const input = document.createElement('input');
-            input.type = 'file';
-            input.accept = '.mid,.midi';
-            input.onchange = () => {
-              if (input.files[0]) handleImportMidi(input.files[0]);
-            };
-            input.click();
-          }}
-          title="Import MIDI file"
-        >
-          Import MIDI
-        </button>
-        <button
-          className="tool-btn"
-          onClick={() => { setShowSettings(true);}}
-          title="Settings"
-        >
-          Settings
-        </button>
-        <span className="toolbar-separator" />
-        <span className="toolbar-label">Time:</span>
-        <select
-          className="duration-select"
-          value={`${timeSignature[0]}/${timeSignature[1]}`}
-          onChange={(e) => {
-            const [num, den] = e.target.value.split('/').map(Number);
-            // Push undo snapshot before changing time signature
-            undoStackRef.current.push(takeSnapshot());
-            if (undoStackRef.current.length > 200) undoStackRef.current.shift();
-            redoStackRef.current = [];
-            setTimeSignature([num, den]);
-            setBarSubdivisions(prev => {
-              const newSubs = Array(prev.length).fill(num);
-              // Remap notes for all bars that changed
-              let remapped = notesRef.current;
-              const oldStarts = barStartBeats(prev);
-              for (let i = 0; i < prev.length; i++) {
-                if (prev[i] !== num) {
-                  remapped = remapNotes(remapped, prev, newSubs, i);
-                  // After remapping bar i, update prev for subsequent bars
-                  prev = [...prev];
-                  prev[i] = num;
-                }
-              }
-              setActiveNotes(remapped);
-              return newSubs;
-            });
-          }}
-        >
-          <option value="2/4">2/4</option>
-          <option value="3/4">3/4</option>
-          <option value="4/4">4/4</option>
-          <option value="5/4">5/4</option>
-          <option value="6/4">6/4</option>
-          <option value="7/4">7/4</option>
-          <option value="3/8">3/8</option>
-          <option value="6/8">6/8</option>
-          <option value="7/8">7/8</option>
-          <option value="9/8">9/8</option>
-          <option value="12/8">12/8</option>
-        </select>
-        <span className="toolbar-label">Bars:</span>
-        <NumberInput
-          className="bpm-input"
-          value={barSubdivisions.length}
-          min={1}
-          onChange={(newCount) => {
-            setBarSubdivisions(prev => {
-              if (newCount > prev.length) {
-                return [...prev, ...Array(newCount - prev.length).fill(timeSignature[0])];
-              } else if (newCount < prev.length) {
-                const tc = totalColumns(prev.slice(0, newCount));
-                setActiveNotes(notesRef.current.filter(n => n.beat < tc));
-                return prev.slice(0, newCount);
-              }
-              return prev;
-            });
-          }}
-        />
-        <span className="toolbar-label">BPM:</span>
-        <NumberInput
-          className="bpm-input"
-          value={bpm}
-          min={30}
-          max={300}
-          onChange={setBpm}
-        />
-        <span className="toolbar-label">Swing %:</span>
-        <NumberInput
-          className="bpm-input"
-          value={Math.round(ratioToAmount(swing / 100) * 100)}
-          min={-100}
-          max={100}
-          step={1}
-          onChange={(amt) => setSwing(amountToRatio(amt / 100) * 100)}
-        />
-        <button className="play-btn" onClick={() => {
-          if (notes.length > 0) setConfirmClear(true);
-          else handleClear();
-        }}>
-          Clear
-        </button>
-        <span className="toolbar-separator" />
-        <div className="rhythm-cluster">
-          <button
-            type="button"
-            className="rhythm-unit-btn"
-            onClick={() => setRhythmUnit(u => u === 'beat' ? 'bar' : 'beat')}
-            title="Toggle whether the division refers to a beat or a bar"
-          >
-            {rhythmUnit === 'bar' ? 'BAR' : 'BEAT'}
-          </button>
-          <div className="subdiv-picker" ref={subdivDialRef}>
-            <button
-              className={`subdiv-btn ${showSubdivDial ? 'open' : ''} ${rhythmLiveKind === 'div' ? 'live' : ''}`}
-              onClick={() => setShowSubdivDial(o => !o)}
-            >
-              ÷{rhythmLiveKind === 'div' && rhythmLiveValue != null ? rhythmLiveValue : subdivisions}
-            </button>
-            {showSubdivDial && (
-              <div className="subdiv-popup">
-                <div className="subdiv-dial-large">
-                  <svg width={120} height={120} viewBox="0 0 120 120">
-                    <circle cx={60} cy={60} r={48} fill="none" stroke="#333" strokeWidth={2} />
-                    {Array.from({ length: 16 }, (_, i) => i + 1).map(val => {
-                      const angle = ((val - 1) / 16) * 2 * Math.PI - Math.PI / 2;
-                      const x = 60 + 48 * Math.cos(angle);
-                      const y = 60 + 48 * Math.sin(angle);
-                      const isActive = val === subdivisions;
-                      return (
-                        <g key={val} style={{ cursor: 'pointer' }} onClick={() => { handleSetSubdivisions(val); }}>
-                          <circle cx={x} cy={y} r={isActive ? 10 : 7}
-                            fill={isActive ? '#e67e22' : '#2a2a2a'}
-                            stroke={isActive ? '#e67e22' : '#555'} strokeWidth={1}
-                          />
-                          <text x={x} y={y} textAnchor="middle" dominantBaseline="central"
-                            fontSize={10} fontWeight="bold"
-                            fill={isActive ? '#000' : '#999'}
-                            style={{ pointerEvents: 'none' }}
-                          >{val}</text>
-                        </g>
-                      );
-                    })}
-                  </svg>
-                  <NumberInput
-                    className="subdiv-center-input"
-                    value={subdivisions}
-                    min={1}
-                    max={32}
-                    onChange={handleSetSubdivisions}
-                    onClick={(e) => e.stopPropagation()}
-                  />
-                </div>
-              </div>
-            )}
-          </div>
-          <div className="subdiv-picker" ref={multDialRef}>
-            <button
-              className={`subdiv-btn ${showMultDial ? 'open' : ''} ${rhythmLiveKind === 'mult' || xHeld ? 'live' : ''}`}
-              onClick={() => setShowMultDial(o => !o)}
-            >
-              ×{rhythmLiveKind === 'mult' && rhythmLiveValue != null ? rhythmLiveValue : rhythmMult}
-            </button>
-            {showMultDial && (
-              <div className="subdiv-popup">
-                <div className="subdiv-dial-large">
-                  <svg width={120} height={120} viewBox="0 0 120 120">
-                    <circle cx={60} cy={60} r={48} fill="none" stroke="#333" strokeWidth={2} />
-                    {Array.from({ length: 8 }, (_, i) => i + 1).map(val => {
-                      const angle = ((val - 1) / 8) * 2 * Math.PI - Math.PI / 2;
-                      const x = 60 + 48 * Math.cos(angle);
-                      const y = 60 + 48 * Math.sin(angle);
-                      const isActive = val === rhythmMult;
-                      return (
-                          <g key={val} style={{ cursor: 'pointer' }} onClick={() => { handleSetRhythmMult(val); }}>
-                           <circle cx={x} cy={y} r={isActive ? 10 : 7}
-                             fill={isActive ? '#e67e22' : '#2a2a2a'}
-                             stroke={isActive ? '#e67e22' : '#555'} strokeWidth={1}
-                           />
-                           <text x={x} y={y} textAnchor="middle" dominantBaseline="central"
-                             fontSize={10} fontWeight="bold"
-                             fill={isActive ? '#000' : '#999'}
-                             style={{ pointerEvents: 'none' }}
-                           >{val}</text>
-                         </g>
-                      );
-                    })}
-                  </svg>
-                  <NumberInput
-                    className="subdiv-center-input"
-                    value={rhythmMult}
-                    min={1}
-                    max={32}
-                    onChange={handleSetRhythmMult}
-                    onClick={(e) => e.stopPropagation()}
-                  />
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-      <TrackStrip
-        tracks={tracks}
-        activeTrackId={activeTrackId}
-        onSwitchTrack={switchTrack}
-        onToggleMute={handleToggleMute}
-        onToggleSolo={handleToggleSolo}
-        onSetVolume={handleSetTrackVolume}
-        onAddTrack={handleAddTrack}
-        onDeleteTrack={handleDeleteTrack}
-        onDuplicateTrack={handleDuplicateTrack}
-        onReorderTracks={handleReorderTracks}
-        onRenameTrack={handleRenameTrack}
-        onLoadAudio={handleLoadAudio}
-        onRemoveAudio={handleRemoveAudio}
-        onToggleVisible={handleToggleVisible}
-        onSetBgOpacity={handleSetBgOpacity}
-        onSetTrackScheme={handleSetTrackScheme}
-        sessionSchemes={sessionSchemes}
-      />
-      <div className="status-bar">
-        <span style={{ color: (freeMode || fingeringMode || machineGunMode) ? '#e67e22' : '#888' }}>
-          {freeMode ? 'FREE ' : ''}{fingeringMode ? 'FINGERING ' : ''}{machineGunMode ? 'DRAW ' : ''}{notes.length} notes{selectedNotes.size > 0 ? ` (${selectedNotes.size} selected)` : ''} | Beat: {selectedBeat + 1} | Bar: {Math.floor(selectedBeat / SUBDIVISIONS) + 1}
-        </span>
-        {positionMode ? <span style={{ color: '#3498db', marginLeft: 8 }}>Select Position {positionModeValue != null ? `(${positionModeValue})` : ''}</span> : null}
-        {!positionMode && (() => {
-          const romanNumerals = ['O','I','II','III','IV','V','VI','VII','VIII','IX','X','XI','XII','XIII','XIV','XV','XVI','XVII','XVIII','XIX','XX','XXI','XXII','XXIII','XXIV'];
-          return <span style={{ color: '#ccc', marginLeft: 8 }}>Pos: {romanNumerals[Math.min(position, romanNumerals.length - 1)]}</span>;
-        })()}
-        <span className="status-separator" />
-        <span className="toolbar-label">Vel:</span>
-        <input
-          type="range"
-          className="velocity-slider"
-          min={0}
-          max={100}
-          value={Math.round(defaultVelocity * 100)}
-          onChange={(e) => setDefaultVelocity(Number(e.target.value) / 100)}
-        />
-        <span style={{ fontSize: '11px', color: '#888', minWidth: 28 }}>{Math.round(defaultVelocity * 100)}%</span>
-      </div>
-      {/* Mobile action bar */}
-      <div className="mobile-actions">
-        <button onClick={undo} title="Undo">↩</button>
-        <button onClick={redo} title="Redo">↪</button>
-        <button onClick={() => {
-          if (selectedNotes.size > 0) {
-            setNotes(prev => prev.filter((_, i) => !selectedNotes.has(i)));
-            setSelectedNotes(new Set());
-          }
-        }} title="Delete">🗑</button>
-        <span className="mobile-actions-sep" />
-        <button onClick={() => setSelectedBeat(b => Math.max(0, b - 1))} title="Prev beat">◀</button>
-        <button onClick={() => setSelectedBeat(b => Math.min(totalBeats - 1, b + 1))} title="Next beat">▶</button>
-        <span className="mobile-actions-sep" />
-        <button onClick={() => {
-          if (selectedNotes.size > 0) {
-            const sel = notes.filter((_, i) => selectedNotes.has(i));
-            const minBeat = Math.min(...sel.map(n => n.beat));
-            clipboardRef.current = sel.map(n => ({ ...n, beat: n.beat - minBeat }));
-          }
-        }} title="Copy">Copy</button>
-        <button onClick={() => {
-          if (clipboardRef.current.length > 0) {
-            const pasteAt = selectedBeat;
-            const newNotes = clipboardRef.current.map(n => ({ ...n, beat: n.beat + pasteAt }));
-            const baseIdx = notes.length;
-            setNotes(prev => [...prev, ...newNotes]);
-            setSelectedNotes(new Set(newNotes.map((_, i) => baseIdx + i)));
-          }
-        }} title="Paste">Paste</button>
-        <span className="mobile-actions-sep" />
-        <button className={freeMode ? 'active' : ''} onClick={() => setFreeMode(m => !m)}>Free</button>
-        <button className={fingeringMode ? 'active' : ''} onClick={() => { fingeringModeRef.current = !fingeringModeRef.current; setFingeringMode(fingeringModeRef.current); }}>Finger</button>
-      </div>
-      <div className="main-area">
-        <Fretboard
-          onNoteClick={handleFretClick}
-          onAdjacentClick={handleAdjacentClick}
-          onMoveNote={handleMoveNote}
-          onDurationChange={handleNoteDurationChange}
-          onBeatChange={handleBeatChange}
-          saveSnapshot={saveSnapshot}
-          commitDrag={commitDrag}
-          freeMode={freeMode}
-          totalBeats={totalBeats}
-          activeNotes={playing ? [] : notes.filter(n => selectedBeat >= n.beat && selectedBeat < n.beat + (n.duration || 1))}
-          backgroundActiveNotes={(() => {
-            const beat = playing && currentBeat !== null ? currentBeat : selectedBeat;
-            if (playing && currentBeat === null) return [];
-            return tracks
-              .filter(t => t.id !== activeTrackId && t.visible !== false)
-              .flatMap(t => t.notes
-                .filter(n => beat >= n.beat && beat < n.beat + (n.duration || 1))
-                .map(n => ({ ...n, _trackOpacity: t.bgOpacity ?? 0.2 }))
-              );
-          })()}
-          playingNotes={playing && currentBeat !== null
-            ? notes.filter(n => currentBeat >= n.beat && currentBeat < n.beat + (n.duration || 1))
-            : []}
-          stringColors={stringColors}
-          getNoteColor={getNoteColor}
-          hoveredNote={hoveredNote}
-          setHoveredNote={setHoveredNote}
-          fingeringMode={fingeringMode}
-          onExitFingeringMode={() => { fingeringModeRef.current = false; setFingeringMode(false); }}
-          onDeleteNote={handleDeleteNote}
-          notes={notes}
-          selectedBeat={selectedBeat}
-          selectedNotes={selectedNotes}
-          setSelectedNotes={setSelectedNotes}
-          verticalScroll={verticalScroll}
-          setVerticalScroll={setVerticalScroll}
-          hotkeys={hotkeys}
-          hoverPreview={hoverPreview.fretboard}
-          hoverVolume={hoverPreview.volume}
-          snapUnit={snapUnit}
-          fretboardZoom={fretboardZoom}
-          setFretboardZoom={setFretboardZoom}
-          voicingPreview={voicingPreview}
-          autoScroll={autoScroll}
-          hoverPill={hoverPill}
-          timelineBodyRef={timelineBodyRef}
-          timelineZoom={timelineZoom}
-          barSubdivisions={barSubdivisions}
-          position={position}
-          setPosition={setPosition}
-          playheadPreview={playheadPreview}
-          setPlayheadPreview={setPlayheadPreview}
-          setSelectedBeat={setSelectedBeat}
-          fretboardAutoForward={fretboardAutoForward}
-          swing={swing}
-          swungDisplay={swungDisplay}
-          activeInstanceScheme={activeTrack?.activeInstanceScheme || null}
-        />
-        <Timeline
-          notes={notes}
-          backgroundNotes={tracks.filter(t => t.id !== activeTrackId && t.visible !== false).flatMap(t =>
-            t.notes.map(n => ({ ...n, _trackColor: '#888', _trackOpacity: t.bgOpacity ?? 0.2 }))
-          )}
-          setNotes={setNotes}
-          saveSnapshot={saveSnapshot}
-          setNotesDrag={setNotesDrag}
-          commitDrag={commitDrag}
-          freeMode={freeMode}
-          timelineZoom={timelineZoom}
-          timelineVerticalZoom={timelineVerticalZoom}
-          setTimelineVerticalZoom={(updater) => {
-            setTimelineVerticalZoom(prev => {
-              const next = typeof updater === 'function' ? updater(prev) : updater;
-              try { localStorage.setItem('guitar-roll-timeline-vertical-zoom', String(next)); } catch {}
-              return next;
-            });
-          }}
-          showVerticalZoomButtons={showTimelineVerticalZoomButtons}
-          barSubdivisions={barSubdivisions}
-          setBarSubdivisions={setBarSubdivisions}
-          setTimelineZoom={setTimelineZoom}
-          position={position}
-          currentBeat={currentBeat}
-          playheadBeatRef={playheadBeatRef}
-          selectedBeat={selectedBeat}
-          setSelectedBeat={setSelectedBeat}
-          playing={playing}
-          playheadPreview={playheadPreview}
-          setPlayheadPreview={setPlayheadPreview}
-          onDeleteNote={handleDeleteNote}
-          loopStart={loopStart}
-          loopEnd={loopEnd}
-          setLoopStart={setLoopStart}
-          setLoopEnd={setLoopEnd}
-          loop={loop}
-          setLoop={setLoop}
-          selectedNotes={selectedNotes}
-          setSelectedNotes={setSelectedNotes}
-          stringColors={stringColors}
-          getNoteColor={getNoteColor}
-          hoveredNote={hoveredNote}
-          setHoveredNote={setHoveredNote}
-          chordRoot={chordRoot}
-          setChordRoot={setChordRoot}
-          verticalScroll={verticalScroll}
-          setVerticalScroll={setVerticalScroll}
-          machineGunMode={machineGunMode}
-          defaultVelocity={defaultVelocity}
-          noteDuration={effectiveNoteLength}
-          setNoteDuration={setNoteDuration}
-          onResizeDuration={setNoteDuration}
-          snapUnit={snapUnit}
-          subdivisions={subdivisions}
-          rhythmMult={rhythmMult}
-          rhythmUnit={rhythmUnit}
-          hotkeys={hotkeys}
-          hoverPreviewPiano={hoverPreview.pianoRoll}
-          hoverPreviewNotes={hoverPreview.timelineNotes}
-          hoverVolume={hoverPreview.volume}
-          tupletLines={tupletLines}
-          chordPreview={chordPreview}
-          onTimelineHover={(pos) => setHoveredNote(pos)}
-          autoScroll={autoScroll}
-          markers={markers}
-          onAddMarker={handleAddMarker}
-          onUpdateMarker={handleUpdateMarker}
-          onDeleteMarker={handleDeleteMarker}
-          audioTracks={tracks.filter(t => t.type === 'audio' && t.waveformPeaks).map(t => ({
-            trackId: t.id,
-            audioOffset: t.audioOffset || 0,
-            audioDuration: t.audioDuration,
-            originalBpm: t.originalBpm,
-            waveformPeaks: t.waveformPeaks,
-            audioBuffer: audioBuffersRef.current[t.id],
-            isActive: t.id === activeTrackId,
-            bgOpacity: t.bgOpacity ?? 0.2,
-            volume: t.volume,
-          }))}
-          bpm={bpm}
-          timeSignature={timeSignature}
-          bodyRefExternal={timelineBodyRef}
-          position={position}
-          setPosition={setPosition}
-          swing={swing}
-          swungDisplay={swungDisplay}
-          activeInstanceScheme={activeTrack?.activeInstanceScheme || null}
-        />
-        <div className={`chord-sidebar ${chordPaletteOpen ? 'open' : ''}`}>
-          <button className="chord-sidebar-toggle" onClick={() => setChordPaletteOpen(o => !o)}>
-            {chordPaletteOpen ? '>' : '<'}
-          </button>
-          {chordPaletteOpen && (
-            <ChordPalette
-              notes={notes}
-              selectedNotes={selectedNotes}
-              selectedBeat={selectedBeat}
-              chordRoot={chordRoot}
-              noteDuration={effectiveNoteLength}
-              onStampChord={handleStampChord}
-              onPreviewChange={setChordPreview}
-            />
-          )}
-        </div>
-      </div>
-
-      {/* Cheat Sheet Overlay */}
-      {showCheatSheet && (
-        <div className="cheatsheet-overlay" onClick={() => setShowCheatSheet(false)}>
-          <div className="cheatsheet" onClick={(e) => e.stopPropagation()}>
-            <h2 className="cheatsheet-title">Keyboard Shortcuts</h2>
-            <div className="cheatsheet-grid">
-              {Object.entries(hotkeys).filter(([, h]) => !h.wheel).map(([id, h]) => (
-                <div key={id} className="cheatsheet-row">
-                  <span className="cheatsheet-key">{formatHotkey(h)}</span>
-                  <span className="cheatsheet-desc">{h.label}</span>
-                </div>
-              ))}
-              <div className="cheatsheet-row">
-                <span className="cheatsheet-key">Shift + Click</span>
-                <span className="cheatsheet-desc">Multi-select notes</span>
-              </div>
-              <div className="cheatsheet-row">
-                <span className="cheatsheet-key">Right Click</span>
-                <span className="cheatsheet-desc">Delete note</span>
-              </div>
-              {REFERENCE_ACTIONS.map((a, i) => (
-                <div key={`ref-${i}`} className="cheatsheet-row">
-                  <span className="cheatsheet-key">{a.display}</span>
-                  <span className="cheatsheet-desc">{a.label}</span>
-                </div>
-              ))}
-              {Object.entries(hotkeys).filter(([, h]) => h.wheel).map(([id, h]) => (
-                <div key={id} className="cheatsheet-row">
-                  <span className="cheatsheet-key">{formatHotkey(h)}</span>
-                  <span className="cheatsheet-desc">{h.label}</span>
-                </div>
-              ))}
-            </div>
-            <div style={{ textAlign: 'center', marginTop: 12, color: '#666', fontSize: 11 }}>
-              Press <b>?</b> or click outside to close
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Settings Modal */}
-      {confirmClear && (
-        <ConfirmDialog
-          message={`Clear all ${notes.length} notes from this track?`}
-          onConfirm={() => { handleClear(); setConfirmClear(false); }}
-          onCancel={() => setConfirmClear(false)}
-        />
-      )}
-
-      {showVoiceLeading && (
-        <VoiceLeadingModal
-          notes={notes}
-          selectedNotes={selectedNotes}
-          onPreview={setVoicingPreview}
-          onApply={(replacements) => {
-            setNotes(prev => prev.map((n, i) => {
-              const rep = replacements.find(r => r.index === i);
-              if (!rep) return n;
-              return { ...n, stringIndex: rep.stringIndex, fret: rep.fret };
-            }));
-            setShowVoiceLeading(false);
-            setVoicingPreview(null);
-          }}
-          onClose={() => { setShowVoiceLeading(false); setVoicingPreview(null); }}
-        />
-      )}
-
-      {showSynthEditor && (
-        <SynthEditor
-          currentInstrument={activeTrack?.instrument || instrument}
-          onInstrumentChange={(id) => {
-            setInstrument(id);
-            setInstrumentState(id);
-            setTracksTracked(prev => prev.map(t =>
-              t.id === activeTrackId ? { ...t, instrument: id } : t
-            ));
-            setInstrumentList(getAllInstruments());
-          }}
-          onClose={() => { setShowSynthEditor(false); setInstrumentList(getAllInstruments()); }}
-        />
-      )}
-
-      {showSettings && (
-        <SettingsModal
-          appState={{
-            tracks, bpm, loop, loopStart, loopEnd,
-            stringColors, synesthesia, sessionScheme, sessionSchemes,
-            projectName, subdivisions, metronome, barSubdivisions, timeSignature, markers,
-          }}
-          onApplyState={applyState}
-          onClose={() => setShowSettings(false)}
-          hoverPreview={hoverPreview}
-          onHoverPreviewChange={(v) => { setHoverPreview(v); localStorage.setItem('guitar-roll-hover-preview', JSON.stringify(v)); }}
-          tupletLines={tupletLines}
-          onTupletLinesChange={(v) => { setTupletLines(v); localStorage.setItem('guitar-roll-tuplet-lines', JSON.stringify(v)); }}
-          autoScroll={autoScroll}
-          onAutoScrollChange={(v) => { setAutoScroll(v); localStorage.setItem('guitar-roll-auto-scroll', JSON.stringify(v)); }}
-          hoverPill={hoverPill}
-          onHoverPillChange={(v) => { setHoverPill(v); localStorage.setItem('guitar-roll-hover-pill', JSON.stringify(v)); }}
-          autoSave={autoSave}
-          onAutoSaveChange={(v) => { setAutoSave(v); localStorage.setItem('guitar-roll-auto-save', JSON.stringify(v)); }}
-          fretboardAutoForward={fretboardAutoForward}
-          onFretboardAutoForwardChange={(v) => { setFretboardAutoForward(v); localStorage.setItem('guitar-roll-fretboard-auto-forward', String(v)); }}
-          fretboardAutoForwardExcludeAdjacent={fretboardAutoForwardExcludeAdjacent}
-          onFretboardAutoForwardExcludeAdjacentChange={(v) => { setFretboardAutoForwardExcludeAdjacent(v); localStorage.setItem('guitar-roll-fretboard-auto-forward-exclude-adjacent', String(v)); }}
-          showTimelineVerticalZoomButtons={showTimelineVerticalZoomButtons}
-          onShowTimelineVerticalZoomButtonsChange={(v) => {
-            setShowTimelineVerticalZoomButtons(v);
-            try { localStorage.setItem('guitar-roll-timeline-vzoom-buttons', String(v)); } catch {}
-          }}
-          swungDisplay={swungDisplay}
-          onSwungDisplayChange={(v) => { setSwungDisplay(v); try { localStorage.setItem('guitar-roll-swung-display', String(v)); } catch {} }}
-          resetMultOnSubdiv={resetMultOnSubdiv}
-          onResetMultOnSubdivChange={(v) => { setResetMultOnSubdiv(v); try { localStorage.setItem('guitar-roll-reset-mult-on-subdiv', String(v)); } catch {} }}
-          rhythmAltersSelected={rhythmAltersSelected}
-          onRhythmAltersSelectedChange={(v) => { setRhythmAltersSelected(v); try { localStorage.setItem('guitar-roll-rhythm-alters-selected', String(v)); } catch {} }}
-          selectingSchemeClosesMenu={selectingSchemeClosesMenu}
-          onSelectingSchemeClosesMenuChange={(v) => { setSelectingSchemeClosesMenu(v); try { localStorage.setItem('guitar-roll-selecting-scheme-closes-menu', String(v)); } catch {} }}
-          onHotkeysChange={setHotkeys}
-        />
-      )}
-      {showInstanceColorMenu && (
-        <InstanceColorMenu
-          position={instanceColorMenuPos}
-          sessionSchemes={sessionSchemes}
-          selectedNotes={selectedNotes}
-          highlightScheme={
-            (() => {
-              if (selectedNotes.size > 0) {
-                const schemes = new Set();
-                selectedNotes.forEach(i => schemes.add(notes[i]?.instanceSchemeName));
-                return schemes.size === 1 ? [...schemes][0] : null;
-              }
-              return activeTrack?.activeInstanceScheme ?? null;
-            })()
-          }
-          onClose={() => setShowInstanceColorMenu(false)}
-          onApply={(schemeName) => {
-            if (selectedNotes.size > 0) {
-              setNotes(prev => prev.map((n, i) => selectedNotes.has(i) ? { ...n, instanceSchemeName: schemeName } : n));
-            } else {
-              setTracksTracked(prev => prev.map(t => t.id === activeTrackId ? { ...t, activeInstanceScheme: schemeName } : t));
-            }
-            if (selectingSchemeClosesMenu) {
-              setShowInstanceColorMenu(false);
-            }
-          }}
-        />
-      )}
-    </div>
-  );
+.project-name {
+  font-size: 14px;
+  font-weight: 600;
+  background: none;
+  border: none;
+  color: #fff;
+  padding: 2px 6px;
+  border-radius: 4px;
+  width: 120px;
 }
 
-function InstanceColorMenu({ position, sessionSchemes, selectedNotes, highlightScheme, onClose, onApply }) {
-  const schemes = { ...sessionSchemes };
-  try {
-    const saved = JSON.parse(localStorage.getItem('guitar-roll-color-schemes') || '{}');
-    Object.assign(schemes, saved);
-  } catch {}
-  const schemeNames = Object.keys(schemes);
-  const containerRef = useRef(null);
-  const focusedIndexRef = useRef(0);
-  const [focusedIndex, setFocusedIndex] = useState(() => {
-    if (highlightScheme === null) return 0;
-    const idx = schemeNames.indexOf(highlightScheme);
-    return idx >= 0 ? idx + 1 : 0;
-  });
-  focusedIndexRef.current = focusedIndex;
-  useEffect(() => {
-    const esc = (e) => { if (e.key === 'Escape') onClose(); };
-    const nav = (e) => {
-      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-        e.preventDefault();
-        e.stopPropagation();
-        const total = 1 + schemeNames.length;
-        const delta = e.key === 'ArrowUp' ? -1 : 1;
-        const next = (focusedIndexRef.current + delta + total) % total;
-        focusedIndexRef.current = next;
-        setFocusedIndex(next);
-        setTimeout(() => {
-          const btn = containerRef.current?.querySelector('.instance-color-button-navigate-style');
-          btn?.scrollIntoView({ block: 'nearest' });
-        }, 0);
-      } else if (e.key === 'Enter') {
-        e.preventDefault();
-        e.stopPropagation();
-        const scheme = focusedIndexRef.current === 0 ? null : schemeNames[focusedIndexRef.current - 1];
-        onApply(scheme);
-      }
-    };
-    document.addEventListener('keydown', esc);
-    document.addEventListener('keydown', nav);
-    return () => {
-      document.removeEventListener('keydown', esc);
-      document.removeEventListener('keydown', nav);
-    };
-  }, [onClose, schemeNames.length, onApply]);
-  useEffect(() => {
-    const btn = containerRef.current?.querySelector('.selected-instance-color-button');
-    btn?.scrollIntoView({ block: 'nearest' });
-  }, [highlightScheme]);
-  const getPreviewColors = (name) => {
-    const sc = schemes[name];
-    if (!sc) return [];
-    const notes = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
-    return notes.map(n => sc[n]).filter(Boolean).slice(0, 12);
-  };
-  const left = position.left !== null && position.left !== undefined ? Math.min(position.left, window.innerWidth - 260) : 'auto';
-  const right = position.right !== null && position.right !== undefined ? position.right : 'auto';
-  const top = Math.min(position.top, window.innerHeight - 300);
-  return (
-    <div className="instance-color-menu-overlay" onClick={(e) => { if (e.target.classList.contains('instance-color-menu-overlay')) onClose(); }}>
-      <div ref={containerRef} className="instance-color-menu" style={{ position: 'absolute', left, top, right }}>
-        <div style={{ color: '#fff', fontSize: 12, marginBottom: 6, fontWeight: 'bold' }}>
-          {selectedNotes.size > 0 ? 'Instance color for selection' : 'Instance color for new notes'}
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <button className={`settings-btn-sm ${focusedIndex === 0 ? 'instance-color-button-navigate-style' : ''} ${highlightScheme === null ? 'selected-instance-color-button' : ''}`} onClick={() => onApply(null)} style={{ textAlign: 'left' }}>None</button>
-          {schemeNames.map((name, i) => (
-            <button key={name} className={`settings-btn-sm ${focusedIndex === i + 1 ? 'instance-color-button-navigate-style' : ''} ${highlightScheme === name ? 'selected-instance-color-button' : ''}`} onClick={() => onApply(name)} style={{ textAlign: 'left', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, maxWidth: '100%' }}>
-              <div className="scheme-colors-preview" style={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
-                {getPreviewColors(name).map((c, ci) => (
-                  <div key={ci} className="scheme-color-dot" style={{ width: 10, height: 10, background: c, border: '1px solid #333' }} />
-                ))}
-              </div>
-              <span style={{ fontSize: 11, color: '#ddd', wordBreak: 'break-word', maxWidth: '100%' }}>{name}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
+.project-name:hover {
+  background: #2a2a2a;
 }
 
-export default App;
+.project-name:focus {
+  outline: none;
+  background: #2a2a2a;
+  border: 1px solid #3498db;
+}
+
+.play-btn {
+  background: #2a2a2a;
+  color: #ddd;
+  border: none;
+  padding: 0 14px;
+  height: 28px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: background 0.12s, color 0.12s;
+}
+
+.play-btn:hover {
+  background: #353535;
+  color: #fff;
+}
+
+.play-btn:active {
+  background: #1e1e1e;
+}
+
+.play-btn.playing {
+  background: #c0392b;
+  color: #fff;
+}
+
+.play-btn.playing:hover {
+  background: #d04030;
+}
+
+.tool-btn {
+  background: #2a2a2a;
+  color: #ddd;
+  border: none;
+  padding: 0 12px;
+  height: 28px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: background 0.12s, color 0.12s;
+}
+
+.tool-btn:hover {
+  background: #353535;
+  color: #fff;
+}
+
+.tool-btn:active {
+  background: #1e1e1e;
+}
+
+.tool-btn.active {
+  background: #2980b9;
+  color: #fff;
+}
+
+.tool-btn.active:hover {
+  background: #3498db;
+}
+
+.bpm-input {
+  width: 50px;
+  height: 26px;
+  background: #2a2a2a;
+  color: #fff;
+  border: 1px solid #555;
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 13px;
+  text-align: center;
+  box-sizing: border-box;
+}
+
+.bpm-input:focus {
+  outline: none;
+  border-color: #3498db;
+}
+
+/* Hide spinner arrows on all number inputs */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* NumberInput drag-to-change */
+.number-input {
+  cursor: ns-resize;
+  user-select: none;
+}
+.number-input:focus {
+  cursor: text;
+  user-select: text;
+}
+.number-input.dragging {
+  cursor: ns-resize;
+}
+
+.duration-select {
+  background: #2a2a2a;
+  color: #fff;
+  border: 1px solid #555;
+  border-radius: 4px;
+  padding: 0 8px;
+  height: 26px;
+  font-size: 13px;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.duration-select:focus {
+  outline: none;
+  border-color: #3498db;
+}
+
+.tuplet-input {
+  width: 42px;
+  height: 26px;
+  background: #2a2a2a;
+  color: #fff;
+  border: 1px solid #555;
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 13px;
+  text-align: center;
+  box-sizing: border-box;
+}
+
+.tuplet-input:focus {
+  outline: none;
+  border-color: #3498db;
+}
+
+.toolbar-label {
+  font-size: 11px;
+  color: #888;
+  white-space: nowrap;
+  margin-right: -2px;
+}
+
+.toolbar-separator {
+  width: 1px;
+  height: 18px;
+  background: #444;
+  margin: 0 2px;
+}
+
+.subdiv-picker {
+  position: relative;
+}
+
+.subdiv-btn {
+  background: #2a2a2a;
+  color: #fff;
+  border: 1px solid #555;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.subdiv-btn:hover, .subdiv-btn.open {
+  border-color: #aaa;
+  background: #353535;
+  color: #fff;
+}
+
+.subdiv-popup {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 4px;
+  background: #1e1e1e;
+  border: 1px solid #555;
+  border-radius: 8px;
+  padding: 12px;
+  z-index: 60;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.subdiv-dial-large {
+  position: relative;
+}
+
+.subdiv-dial-large svg {
+  display: block;
+}
+
+.subdiv-center-input {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 36px;
+  height: 28px;
+  font-size: 16px;
+  font-weight: bold;
+  color: #e67e22;
+  background: #222;
+  border: 1px solid #555;
+  border-radius: 6px;
+  text-align: center;
+  padding: 0;
+  outline: none;
+}
+
+.subdiv-center-input:focus {
+  border-color: #e67e22;
+}
+
+/* Rhythm cluster (beat/bar, subdivision, multiplier) */
+.rhythm-cluster {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 4px;
+}
+
+.rhythm-unit-btn {
+  background: transparent;
+  color: #888;
+  border: 1px solid transparent;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.rhythm-unit-btn:hover {
+  background: #282828;
+  color: #fff;
+}
+
+/* Make subdiv-picker work well inside rhythm-cluster */
+.rhythm-cluster .subdiv-picker {
+  position: relative;
+}
+
+.rhythm-cluster .subdiv-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  min-width: 44px;
+  text-align: center;
+}
+
+/* Live entry indicator — shows while digits are typed or while X is held (multiplier target) */
+.rhythm-cluster .subdiv-btn.live {
+  border-color: #ffffff;
+  background: #1a1a1a;
+  color: #fff;
+}
+
+.rhythm-cluster .subdiv-popup {
+  left: 0;
+  transform: none;
+  margin-top: 2px;
+}
+
+/* Chord Sidebar */
+.chord-sidebar {
+  position: relative;
+  display: flex;
+  flex-shrink: 0;
+  width: 16px;
+  transition: width 0.2s ease;
+}
+
+.chord-sidebar.open {
+  width: 136px;
+}
+
+.chord-sidebar-toggle {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 48px;
+  background: #1a1a1a;
+  color: #888;
+  border: 1px solid #333;
+  border-right: none;
+  border-radius: 4px 0 0 4px;
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chord-sidebar-toggle:hover {
+  color: #fff;
+  background: #222;
+}
+
+/* Chord Palette */
+.chord-palette {
+  width: 120px;
+  min-width: 120px;
+  margin-left: 16px;
+  border-left: 1px solid #333;
+  background: #111;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chord-palette-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border-bottom: 1px solid #333;
+  flex-shrink: 0;
+}
+
+.chord-palette-title {
+  font-size: 11px;
+  font-weight: bold;
+  color: #aaa;
+  flex: 1;
+}
+
+.chord-save-btn {
+  background: #2a2a2a;
+  color: #888;
+  border: 1px solid #444;
+  border-radius: 3px;
+  padding: 2px 5px;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.chord-save-btn:hover { color: #fff; border-color: #888; }
+
+.chord-root-selector {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1px;
+  padding: 4px 4px 2px;
+  border-bottom: 1px solid #333;
+}
+
+.chord-root-btn {
+  background: #1e1e1e;
+  color: #888;
+  border: 1px solid #333;
+  border-radius: 2px;
+  padding: 1px 0;
+  font-size: 9px;
+  cursor: pointer;
+  flex: 1;
+  min-width: 16px;
+  text-align: center;
+}
+
+.chord-root-btn:hover { color: #fff; }
+.chord-root-btn.active { background: #2980b9; color: #fff; border-color: #3498db; }
+
+.chord-palette-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px;
+  scrollbar-width: none;
+}
+
+.chord-palette-list::-webkit-scrollbar { display: none; }
+
+.chord-empty {
+  font-size: 10px;
+  color: #555;
+  padding: 8px 4px;
+  text-align: center;
+  line-height: 1.4;
+}
+
+.chord-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-bottom: 2px;
+}
+
+.chord-stamp-btn {
+  flex: 1;
+  background: #1e1e1e;
+  color: #ccc;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 4px 6px;
+  font-size: 11px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  text-align: left;
+}
+
+.chord-stamp-btn:hover { background: #2a2a2a; border-color: #555; }
+
+.chord-note-count {
+  font-size: 9px;
+  color: #666;
+}
+
+.chord-name-input {
+  font-size: 11px;
+  color: #fff;
+  background: #111;
+  border: 1px solid #3498db;
+  border-radius: 2px;
+  padding: 0 3px;
+  width: 60px;
+  outline: none;
+}
+
+.chord-delete-btn {
+  background: none;
+  color: #555;
+  border: none;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.chord-delete-btn:hover { color: #e74c3c; }
+
+/* Track Panel — collapsible */
+.track-panel {
+  background: #0d0d0d;
+  border-bottom: 1px solid #333;
+  flex-shrink: 0;
+}
+
+.track-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: #0d0d0d;
+}
+
+.track-expand-btn {
+  background: #2a2a2a;
+  color: #ccc;
+  border: none;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.track-expand-btn:hover { background: #353535; color: #fff; }
+
+.track-tabs-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  flex: 1;
+  scrollbar-width: none;
+}
+
+.track-tabs-row::-webkit-scrollbar { display: none; }
+
+.track-tab-mini {
+  background: #1a1a1a;
+  color: #ccc;
+  border: 1px solid #333;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.track-tab-mini:hover { background: #222; color: #fff; }
+
+.track-tab-mini.active {
+  background: #1e2a3a;
+  border-color: #3498db;
+  color: #fff;
+}
+
+.track-tab-mini.muted { opacity: 0.5; }
+
+.track-mini-badge {
+  font-size: 9px;
+  font-weight: bold;
+  color: #e74c3c;
+  background: rgba(231, 76, 60, 0.2);
+  padding: 0 3px;
+  border-radius: 2px;
+}
+
+.track-mini-badge.solo {
+  color: #f1c40f;
+  background: rgba(241, 196, 15, 0.2);
+}
+
+.track-add-btn-mini {
+  background: #1a1a1a;
+  color: #888;
+  border: 1px dashed #444;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 14px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.track-add-btn-mini:hover { color: #fff; border-color: #888; }
+
+/* Expanded rows */
+.track-rows {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 8px 8px;
+  gap: 4px;
+  border-top: 1px solid #222;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.track-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.track-row:hover { background: #1f1f1f; }
+
+.track-row.active {
+  background: #1e2a3a;
+  border-color: #3498db;
+}
+
+.track-row.muted { opacity: 0.6; }
+.track-row.drag-over {
+  border-top: 2px solid #e67e22;
+}
+.track-row[draggable] {
+  cursor: grab;
+}
+
+.track-row-name {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 120px;
+  flex-shrink: 0;
+}
+
+.track-row-name-text {
+  font-size: 13px;
+  font-weight: bold;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+
+.track-row-inst {
+  font-size: 10px;
+  color: #888;
+}
+
+.track-row-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  flex-wrap: wrap;
+}
+
+.track-btn-lg {
+  background: #2a2a2a;
+  color: #888;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: bold;
+  cursor: pointer;
+  min-width: 32px;
+  height: 28px;
+}
+
+.track-btn-lg:hover { color: #fff; background: #333; }
+.track-btn-lg.active-red { background: #5a1a1a; color: #e74c3c; border-color: #e74c3c; }
+.track-btn-lg.active-yellow { background: #4a3a1a; color: #f1c40f; border-color: #f1c40f; }
+.track-btn-lg.track-delete { color: #e74c3c; margin-left: auto; flex-shrink: 0; }
+.track-btn-lg.track-delete:hover { color: #fff; background: #e74c3c; }
+
+.track-slider-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.track-slider-label {
+  font-size: 10px;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  min-width: 28px;
+}
+
+.track-slider {
+  width: 100px;
+  height: 4px;
+  appearance: none;
+  -webkit-appearance: none;
+  background: #333;
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+
+.track-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #3498db;
+  cursor: pointer;
+}
+
+.track-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #3498db;
+  border: none;
+  cursor: pointer;
+}
+
+.track-slider-ghost::-webkit-slider-thumb { background: #888; }
+.track-slider-ghost::-moz-range-thumb { background: #888; }
+
+.track-scheme-select {
+  background: #2a2a2a;
+  color: #fff;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 11px;
+  outline: none;
+}
+
+.track-scheme-select:focus { border-color: #3498db; }
+
+.track-slider-val {
+  font-size: 11px;
+  color: #888;
+  min-width: 32px;
+  font-family: monospace;
+}
+
+/* Legacy styles still used somewhere */
+.track-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 8px;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 4px;
+  cursor: pointer;
+  min-width: 100px;
+  flex-shrink: 0;
+}
+
+.track-tab:hover { background: #222; }
+
+.track-tab.active {
+  background: #1e2a3a;
+  border-color: #3498db;
+}
+
+.track-tab.muted { opacity: 0.5; }
+
+.track-tab-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.track-name {
+  font-size: 11px;
+  font-weight: bold;
+  color: #ddd;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 70px;
+}
+
+.track-name-input {
+  font-size: 11px;
+  font-weight: bold;
+  color: #fff;
+  background: #111;
+  border: 1px solid #3498db;
+  border-radius: 2px;
+  padding: 0 3px;
+  width: 60px;
+  outline: none;
+}
+
+.track-inst {
+  font-size: 9px;
+  color: #666;
+  white-space: nowrap;
+}
+
+.track-tab-controls {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.track-btn {
+  background: #2a2a2a;
+  color: #888;
+  border: 1px solid #444;
+  border-radius: 2px;
+  padding: 1px 4px;
+  font-size: 9px;
+  font-weight: bold;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.track-btn:hover { color: #fff; }
+.track-btn.active-red { background: #5a1a1a; color: #e74c3c; border-color: #e74c3c; }
+.track-btn.active-yellow { background: #4a3a1a; color: #f1c40f; border-color: #f1c40f; }
+.track-delete { color: #666; }
+.track-delete:hover { color: #e74c3c; }
+
+.track-volume {
+  width: 40px;
+  height: 3px;
+  appearance: none;
+  -webkit-appearance: none;
+  background: #333;
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+
+.track-volume::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #3498db;
+  cursor: pointer;
+}
+
+.track-volume::-moz-range-thumb {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #3498db;
+  border: none;
+  cursor: pointer;
+}
+
+.track-volume.track-opacity {
+  width: 30px;
+}
+
+.track-volume.track-opacity::-webkit-slider-thumb {
+  background: #888;
+}
+
+.track-volume.track-opacity::-moz-range-thumb {
+  background: #888;
+}
+
+.track-add-btn {
+  background: #1a1a1a;
+  color: #888;
+  border: 1px dashed #444;
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: 16px;
+  cursor: pointer;
+  flex-shrink: 0;
+  align-self: center;
+}
+
+.track-add-btn:hover { color: #fff; border-color: #888; }
+
+/* Duration Picker */
+.duration-picker {
+  position: relative;
+}
+
+.duration-picker-btn {
+  background: #2a2a2a;
+  color: #fff;
+  border: 1px solid #555;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.duration-picker-btn:hover,
+.duration-picker-btn.open {
+  border-color: #3498db;
+  background: #333;
+}
+
+.dp-beats {
+  color: #e67e22;
+  font-size: 10px;
+  margin-left: 4px;
+}
+
+.duration-picker-popup {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  background: #1e1e1e;
+  border: 1px solid #555;
+  border-radius: 8px;
+  padding: 10px;
+  z-index: 60;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6);
+  min-width: 160px;
+}
+
+.dp-note-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 3px;
+}
+
+.dp-note-btn {
+  background: #2a2a2a;
+  color: #ccc;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 5px 0;
+  font-size: 11px;
+  cursor: pointer;
+  text-align: center;
+}
+
+.dp-note-btn:hover {
+  background: #3a3a3a;
+  color: #fff;
+}
+
+.dp-note-btn.active {
+  background: #2980b9;
+  border-color: #3498db;
+  color: #fff;
+  font-weight: bold;
+}
+
+.dp-divider {
+  height: 1px;
+  background: #333;
+  margin: 8px 0;
+}
+
+.dp-tuplet-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.dp-tuplet-label {
+  font-size: 10px;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+
+.tuplet-dial {
+  position: relative;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.tuplet-dial svg {
+  display: block;
+}
+
+.tuplet-center {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 16px;
+  font-weight: bold;
+  color: #e67e22;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.tuplet-center:hover {
+  background: rgba(230, 126, 34, 0.15);
+}
+
+.tuplet-center-input {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 28px;
+  height: 24px;
+  font-size: 14px;
+  font-weight: bold;
+  color: #e67e22;
+  background: #222;
+  border: 1px solid #e67e22;
+  border-radius: 4px;
+  text-align: center;
+  padding: 0;
+  outline: none;
+}
+
+.status-bar {
+  display: flex;
+  align-items: center;
+  padding: 3px 16px;
+  background: #0e0e0e;
+  border-bottom: 1px solid #333;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.status-separator {
+  width: 1px;
+  height: 14px;
+  background: #444;
+  margin: 0 8px;
+}
+
+.velocity-slider {
+  width: 80px;
+  height: 4px;
+  appearance: none;
+  -webkit-appearance: none;
+  background: #333;
+  border-radius: 2px;
+  outline: none;
+  margin: 0 4px;
+  cursor: pointer;
+}
+
+.velocity-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #e67e22;
+  cursor: pointer;
+}
+
+.velocity-slider::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #e67e22;
+  border: none;
+  cursor: pointer;
+}
+
+.main-area {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* Fretboard */
+.fretboard-container {
+  width: 350px;
+  min-width: 350px;
+  border-right: 1px solid #333;
+  margin-right: 35px;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/* Note/mode indicator bar above the fretboard */
+.fretboard-note-box {
+  height: 30px;
+  border-bottom: 1px solid #333;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: bold;
+  color: #fff;
+  background: #111;
+  letter-spacing: 1px;
+}
+
+.fretboard-scroll {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+}
+
+.fretboard-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.fretboard {
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+  touch-action: pan-y;
+}
+
+.fretboard-string {
+  position: absolute;
+  width: 1px;
+  top: 0;
+  bottom: 0;
+  background: #fff;
+}
+
+.fretboard-string.thick {
+  width: 2px;
+}
+
+.fretboard-fret {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: #666;
+}
+
+.fretboard-nut {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  top: 0;
+  background: #fff;
+}
+
+.fret-dot {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ccc;
+  transform: translate(-50%, -50%);
+}
+
+.fretboard-label {
+  position: absolute;
+  font-size: 9px;
+  color: #666;
+  transform: translateX(-50%);
+  top: 4px;
+}
+
+.fret-hover {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+/* Timeline */
+.timeline-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  user-select: none;
+}
+
+.timeline-header {
+  height: 30px;
+  min-height: 30px;
+  border-bottom: 1px solid #333;
+  position: relative;
+  background: #111;
+  overflow: hidden;
+  cursor: crosshair;
+  user-select: none;
+}
+
+.loop-region-header {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(41, 128, 185, 0.4);
+  z-index: 0;
+  pointer-events: none;
+}
+
+.loop-region-grid {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(41, 128, 185, 0.06);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.loop-dim {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.loop-boundary {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #2980b9;
+  pointer-events: none;
+  z-index: 15;
+}
+
+.bar-number {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  font-size: 10px;
+  color: #666;
+  padding-left: 3px;
+  border-left: 1px solid #333;
+}
+
+.bar-number.bar-start {
+  font-size: 12px;
+  font-weight: bold;
+  color: #ccc;
+  border-left: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.header-beat-marker {
+  position: absolute;
+  bottom: 0;
+  transform: translateX(-50%);
+  pointer-events: auto;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.4));
+}
+
+.header-beat-marker::before {
+  content: '';
+  width: 16px;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: 2px 2px 0 0;
+}
+
+.header-beat-marker::after {
+  content: '';
+  width: 0;
+  height: 0;
+  border-left: 8px solid transparent;
+  border-right: 8px solid transparent;
+  border-top: 10px solid rgba(255, 255, 255, 0.9);
+}
+
+.header-beat-marker:hover {
+  filter: drop-shadow(0 0 6px rgba(255, 255, 255, 0.6));
+}
+
+.header-beat-marker:hover::before {
+  background: #fff;
+}
+
+.header-beat-marker:hover::after {
+  border-top-color: #fff;
+}
+
+.header-playhead {
+  position: absolute;
+  bottom: 0;
+  transform: translateX(-50%);
+  pointer-events: none;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  filter: drop-shadow(0 0 3px #e74c3c);
+}
+
+.header-playhead::before {
+  content: '';
+  width: 16px;
+  height: 8px;
+  background: #e74c3c;
+  border-radius: 2px 2px 0 0;
+}
+
+.header-playhead::after {
+  content: '';
+  width: 0;
+  height: 0;
+  border-left: 8px solid transparent;
+  border-right: 8px solid transparent;
+  border-top: 10px solid #e74c3c;
+  border-left: 1px solid #333;
+}
+
+.timeline-body {
+  flex: 1;
+  position: relative;
+  overflow: auto;
+  scrollbar-width: none;
+  touch-action: pan-x pan-y;
+}
+
+.timeline-body::-webkit-scrollbar {
+  display: none;
+}
+
+.timeline-grid {
+  position: relative;
+  min-width: 100%;
+}
+
+.grid-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-bottom: 1px solid #1a1a1a;
+}
+
+.grid-col {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px solid #1a1a1a;
+}
+
+.grid-col.bar-line {
+  border-left-color: rgba(255, 255, 255, 0.3);
+}
+
+.grid-col.tuplet-line {
+  border-left: 1px dashed rgba(230, 126, 34, 0.35);
+}
+
+.timeline-note {
+  position: absolute;
+  border-radius: 2px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: bold;
+  color: #000;
+}
+
+.timeline-note {
+  overflow: hidden;
+}
+
+.timeline-note:hover {
+  filter: brightness(1.3);
+}
+
+.note-resize-handle {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: ew-resize;
+  background: rgba(255, 255, 255, 0.3);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.note-resize-handle-left {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: ew-resize;
+  background: rgba(255, 255, 255, 0.3);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.timeline-note:hover .note-resize-handle,
+.timeline-note:hover .note-resize-handle-left {
+  opacity: 1;
+}
+
+.timeline-note.ghost {
+  border: 1px dashed;
+  background: transparent !important;
+  font-style: italic;
+  color: #999;
+}
+
+.note-bend-indicator {
+  font-size: 7px;
+  color: #e67e22;
+  margin-left: 2px;
+}
+
+.note-slide-indicator {
+  font-size: 8px;
+  color: #3498db;
+  margin-left: 1px;
+}
+
+.timeline-note.selected {
+  outline: 2px solid #fff;
+  filter: brightness(1.3);
+  z-index: 15;
+}
+
+.timeline-note.playing {
+  filter: brightness(1.8);
+  z-index: 14;
+}
+
+.timeline-note.selected.playing {
+  filter: brightness(2);
+}
+
+.timeline-cursor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #fff;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.timeline-selected-col {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(255, 255, 255, 0.08);
+  border-left: 2px solid rgba(255, 255, 255, 0.4);
+  border-right: 2px solid rgba(255, 255, 255, 0.4);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.timeline-selected-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.7);
+  pointer-events: none;
+  z-index: 2;
+  box-shadow: 0 0 4px rgba(255, 255, 255, 0.3);
+}
+
+/* Timeline markers */
+.timeline-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 8;
+  pointer-events: auto;
+  cursor: grab;
+}
+
+.timeline-marker:active { cursor: grabbing; }
+
+.timeline-marker-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 2px;
+  background: #3498db;
+}
+
+.timeline-marker-label {
+  position: absolute;
+  top: 0;
+  left: 2px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: bold;
+  color: #fff;
+  white-space: nowrap;
+  border-radius: 0 3px 3px 0;
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.marker-name-input {
+  background: transparent;
+  border: none;
+  color: #fff;
+  font-size: 10px;
+  font-weight: bold;
+  padding: 0;
+  outline: none;
+  width: 80px;
+}
+
+.timeline-marker-line-grid {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  opacity: 0.3;
+  pointer-events: none;
+  z-index: 8;
+}
+
+.cursor-hover-rect {
+  position: absolute;
+  border: 1px dashed rgba(255, 255, 255, 0.6);
+  background: transparent;
+  pointer-events: none;
+  z-index: 19;
+  border-radius: 2px;
+}
+
+.duration-preview {
+  position: absolute;
+  background: rgba(46, 204, 113, 0.15);
+  border: 1px solid rgba(46, 204, 113, 0.5);
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 20;
+}
+
+.chord-preview-note {
+  position: absolute;
+  background: rgba(46, 204, 113, 0.25);
+  border: 1px solid rgba(46, 204, 113, 0.7);
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 20;
+  animation: chord-blink 0.6s ease-in-out infinite;
+}
+
+@keyframes chord-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #e74c3c;
+  pointer-events: none;
+  z-index: 20;
+}
+
+/* Marquee Selection */
+.marquee-rect {
+  position: absolute;
+  border: 1px solid rgba(100, 160, 255, 0.8);
+  background: rgba(100, 160, 255, 0.1);
+  pointer-events: none;
+  z-index: 25;
+}
+.marquee-rect.eraser {
+  border-color: rgba(255, 80, 80, 0.8);
+  background: rgba(255, 80, 80, 0.15);
+}
+
+/* Piano Roll */
+.piano-spacer {
+  width: 64px;
+  min-width: 64px;
+  height: 30px;
+  background: #111;
+  border-bottom: 1px solid #333;
+  border-right: 1px solid #333;
+}
+
+.piano-roll-scroll {
+  width: 64px;
+  min-width: 64px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: #e8e8e8;
+  border-right: 1px solid #333;
+}
+
+.piano-roll-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.piano-roll-inner {
+  position: relative;
+}
+
+.piano-key {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.piano-key.white {
+  background: #e8e8e8;
+  justify-content: flex-end;
+  padding-right: 4px;
+  /* Divider to the next key face; hidden behind black keys on the left */
+  border-bottom: 1px solid #1a1a1a;
+}
+
+.piano-key.black {
+  background: #222;
+  width: 60%;
+  justify-content: flex-end;
+  padding-right: 3px;
+  z-index: 2;
+  border-radius: 0 2px 2px 0;
+  border-right: 1px solid #000;
+}
+
+.piano-key-label {
+  font-size: 9px;
+  font-weight: bold;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.piano-key.white .piano-key-label {
+  color: #333;
+}
+
+.piano-key.black .piano-key-label {
+  color: #aaa;
+}
+
+.piano-key.white.hovered {
+  background: #b0d4ff;
+}
+
+.piano-key.black.hovered {
+  background: #4488cc;
+}
+
+.piano-key.white.chord-root {
+  background: #a3d9a5;
+}
+
+.piano-key.black.chord-root {
+  background: #2e8b57;
+}
+
+/* Hotkeys */
+/* Wide hotkeys page: shortcuts flow into columns, no inner scrolling.
+   Doubled class specificity so it wins over the base .settings-popup rule
+   that appears later in this file. */
+.settings-popup.settings-popup-hotkeys {
+  max-width: 1000px;
+  width: min(1000px, 96vw);
+}
+
+.hotkeys-list {
+  column-count: 3;
+  column-gap: 24px;
+}
+
+@media (max-width: 900px) {
+  .hotkeys-list {
+    column-count: 2;
+  }
+}
+
+@media (max-width: 620px) {
+  .hotkeys-list {
+    column-count: 1;
+  }
+}
+
+.hotkey-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid #222;
+  break-inside: avoid;
+}
+
+.hotkey-row.conflict {
+  background: rgba(231, 76, 60, 0.1);
+  border-color: #e74c3c;
+}
+
+.hotkey-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hotkey-label {
+  font-size: 13px;
+  font-weight: bold;
+  color: #ddd;
+}
+
+.hotkey-desc {
+  font-size: 11px;
+  color: #666;
+}
+
+.hotkey-key {
+  background: #2a2a2a;
+  color: #ccc;
+  border: 1px solid #555;
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-family: monospace;
+  cursor: pointer;
+  min-width: 80px;
+  text-align: center;
+}
+
+.hotkey-key:hover {
+  border-color: #3498db;
+  color: #fff;
+}
+
+.hotkey-key.recording {
+  border-color: #e67e22;
+  color: #e67e22;
+  animation: pulse-border 1s infinite;
+}
+
+.hotkey-key.fixed {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.hotkey-conflicts {
+  margin-bottom: 12px;
+}
+
+.hotkey-conflict {
+  background: rgba(231, 76, 60, 0.15);
+  border: 1px solid #e74c3c;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #e74c3c;
+  margin-bottom: 4px;
+}
+
+@keyframes pulse-border {
+  0%, 100% { border-color: #e67e22; }
+  50% { border-color: #555; }
+}
+
+/* Subdivision Menu */
+.subdiv-menu-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+}
+
+.subdiv-menu {
+  position: fixed;
+  background: #1e1e1e;
+  border: 1px solid #555;
+  border-radius: 6px;
+  padding: 6px 0;
+  min-width: 120px;
+  z-index: 51;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+
+.subdiv-menu-title {
+  padding: 4px 12px 6px;
+  font-size: 11px;
+  color: #888;
+  border-bottom: 1px solid #333;
+  margin-bottom: 4px;
+}
+
+.subdiv-menu-item {
+  display: block;
+  width: 100%;
+  background: none;
+  border: none;
+  color: #ccc;
+  padding: 5px 12px;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.subdiv-menu-item:hover {
+  background: #333;
+}
+
+.subdiv-menu-item.active {
+  color: #3498db;
+  font-weight: bold;
+}
+
+/* Settings Modal */
+.settings-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.settings-popup {
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 10px;
+  padding: 20px;
+  min-width: 320px;
+  max-width: 420px;
+  max-height: 88vh;
+  overflow-y: auto;
+  color: #fff;
+  user-select: text;
+  -webkit-user-select: text;
+  position: relative;
+}
+
+/* Standard top-right close button */
+.settings-x {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #999;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.settings-x:hover {
+  background: #333;
+  color: #fff;
+}
+
+/* Top-left back arrow on settings sub-pages */
+.settings-back-arrow {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #999;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.settings-back-arrow:hover {
+  background: #333;
+  color: #fff;
+}
+
+/* Small labelled sub-group inside a section */
+.settings-sublabel {
+  display: block;
+  margin: 8px 0 5px;
+  font-size: 11px;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.settings-sublabel:first-of-type {
+  margin-top: 0;
+}
+
+/* Inline checkbox group inside a section */
+.settings-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-bottom: 4px;
+}
+
+.settings-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #ccc;
+  cursor: pointer;
+}
+
+.settings-popup-wide {
+  min-width: 360px;
+}
+
+/* Main settings page: two columns so everything fits without scrolling */
+.settings-popup-main {
+  max-width: 720px;
+  width: min(720px, 92vw);
+}
+
+.settings-columns {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.settings-col {
+  flex: 1;
+  min-width: 0;
+}
+
+@media (max-width: 760px) {
+  .settings-columns {
+    flex-direction: column;
+  }
+
+  .settings-col {
+    width: 100%;
+  }
+}
+
+.settings-title {
+  margin: 0 0 12px;
+  font-size: 18px;
+  font-weight: bold;
+  border-bottom: 1px solid #333;
+  padding-bottom: 8px;
+  padding-right: 32px;
+}
+
+.settings-title--centered {
+  text-align: center;
+}
+
+.settings-section {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  background: #202020;
+  border: 1px solid #2d2d2d;
+  border-radius: 8px;
+}
+
+.settings-section h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #ddd;
+  font-weight: 600;
+}
+
+/* Category label above a run of related sections */
+.settings-group {
+  margin: 14px 0 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: #7da7d9;
+}
+
+.settings-group:first-of-type {
+  margin-top: 0;
+}
+
+/* One-line explanation under a section heading */
+.settings-desc {
+  margin: -2px 0 10px;
+  font-size: 12px;
+  color: #8a8a8a;
+  line-height: 1.4;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.settings-row input[type="color"] {
+  width: 36px;
+  height: 28px;
+  border: 1px solid #555;
+  border-radius: 4px;
+  background: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+.settings-label {
+  font-weight: bold;
+  font-size: 14px;
+  color: #fff;
+  min-width: 20px;
+}
+
+.settings-hex {
+  font-size: 12px;
+  color: #666;
+  font-family: monospace;
+}
+
+.settings-hex-input {
+  background: #222;
+  color: #ccc;
+  border: 1px solid #555;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 13px;
+  font-family: monospace;
+  width: 80px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.settings-hex-input:focus {
+  outline: none;
+  border-color: #3498db;
+  color: #fff;
+  background: #2a2a2a;
+}
+
+.settings-input {
+  background: #2a2a2a;
+  color: #fff;
+  border: 1px solid #555;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 13px;
+  flex: 1;
+}
+
+.settings-input:focus {
+  outline: none;
+  border-color: #3498db;
+}
+
+.settings-btn {
+  background: #2a2a2a;
+  color: #ddd;
+  border: none;
+  padding: 8px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: background 0.12s, color 0.12s;
+}
+
+.settings-btn:hover {
+  background: #353535;
+  color: #fff;
+}
+
+.settings-btn:active {
+  background: #1e1e1e;
+}
+
+.settings-btn.settings-close,
+.settings-btn.settings-back {
+  width: 100%;
+  margin-top: 12px;
+}
+
+.settings-btn-sm {
+  background: #2a2a2a;
+  color: #ddd;
+  border: none;
+  padding: 5px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: background 0.12s, color 0.12s;
+}
+
+.settings-btn-sm:hover {
+  background: #353535;
+  color: #fff;
+}
+
+.settings-btn-sm:active {
+  background: #1e1e1e;
+}
+
+.settings-btn-sm.danger:hover {
+  background: #5a1a1a;
+  border-color: #e74c3c;
+  color: #e74c3c;
+}
+
+.settings-row-btns {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.settings-copy-msg {
+  color: #2ecc71;
+  font-size: 12px;
+}
+
+.settings-empty {
+  color: #555;
+  font-size: 13px;
+  font-style: italic;
+  margin: 8px 0;
+}
+
+.settings-date {
+  color: #666;
+  font-size: 11px;
+}
+
+/* Scheme list */
+.schemes-list {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.scheme-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  border-bottom: 1px solid #222;
+}
+
+.scheme-name {
+  font-weight: bold;
+  font-size: 13px;
+  word-break: break-word;
+}
+
+.scheme-active-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: #1f6f45;
+  color: #b7f7ce;
+  font-size: 10px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+
+.scheme-source {
+  color: #777;
+  font-size: 11px;
+  margin-bottom: 8px;
+}
+
+.scheme-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+
+.scheme-colors-preview {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.scheme-color-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  border: 1px solid #333;
+}
+
+.scheme-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.scheme-edit-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 16px;
+}
+
+/* Cheat Sheet Overlay */
+.cheatsheet-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+.cheatsheet {
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 10px;
+  padding: 20px 24px;
+  max-width: 520px;
+  width: 90vw;
+  max-height: 80vh;
+  overflow-y: auto;
+  color: #fff;
+}
+
+.cheatsheet-title {
+  margin: 0 0 14px;
+  font-size: 16px;
+  font-weight: bold;
+  border-bottom: 1px solid #333;
+  padding-bottom: 8px;
+}
+
+.cheatsheet-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px 16px;
+}
+
+.cheatsheet-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0;
+  border-bottom: 1px solid #1e1e1e;
+}
+
+.cheatsheet-key {
+  background: #2a2a2a;
+  color: #ccc;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-family: monospace;
+  white-space: nowrap;
+}
+
+.cheatsheet-desc {
+  font-size: 12px;
+  color: #aaa;
+  margin-left: 8px;
+  text-align: right;
+}
+
+/* Confirm Dialog */
+.confirm-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 300;
+}
+
+.confirm-dialog {
+  background: #1a1a1a;
+  border: 1px solid #555;
+  border-radius: 8px;
+  padding: 20px 24px;
+  min-width: 300px;
+  max-width: 90vw;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
+}
+
+.confirm-message {
+  color: #ddd;
+  font-size: 14px;
+  margin-bottom: 16px;
+  line-height: 1.4;
+}
+
+.confirm-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.confirm-actions.vertical {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.confirm-actions.vertical .settings-btn {
+  width: 100%;
+  white-space: normal;
+}
+
+.confirm-danger {
+  background: #5a1a1a;
+  border-color: #e74c3c;
+  color: #e74c3c;
+}
+
+.confirm-danger:hover {
+  background: #6a2020;
+}
+
+/* Voice Leading Modal */
+.vl-modal {
+  min-width: 400px;
+  max-width: 90vw;
+}
+
+.vl-chords {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+  max-height: 50vh;
+}
+
+.vl-chord-col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 100px;
+  flex-shrink: 0;
+}
+
+.vl-chord-header {
+  font-size: 11px;
+  font-weight: bold;
+  color: #aaa;
+  text-align: center;
+  padding: 2px 0;
+  border-bottom: 1px solid #333;
+}
+
+.vl-voicing {
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 4px 6px;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.vl-voicing:hover { border-color: #555; }
+.vl-voicing.active { border-color: #3498db; background: #1e2a3a; }
+
+.vl-voicing-label {
+  font-weight: bold;
+  color: #ccc;
+  margin-bottom: 2px;
+  display: flex;
+  justify-content: space-between;
+}
+
+.vl-score {
+  font-weight: normal;
+  color: #666;
+  font-size: 10px;
+}
+
+.vl-note {
+  display: flex;
+  gap: 6px;
+  color: #999;
+}
+
+.vl-string { color: #666; min-width: 20px; }
+.vl-fret { color: #e67e22; min-width: 20px; }
+.vl-name { color: #ccc; }
+
+.vl-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  justify-content: flex-end;
+}
+
+@media (max-width: 520px) {
+  .cheatsheet-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Synth Editor */
+.synth-editor {
+  min-width: 420px;
+  max-width: 520px;
+}
+
+.synth-preset-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.synth-preset-item {
+  display: flex;
+  gap: 2px;
+}
+
+.settings-btn-sm.active {
+  background: #2980b9;
+  border-color: #3498db;
+  color: #fff;
+}
+
+.synth-osc-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.synth-osc-row select {
+  background: #2a2a2a;
+  color: #fff;
+  border: 1px solid #555;
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+.synth-osc-row label,
+.synth-filter-row label,
+.synth-adsr label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #aaa;
+}
+
+.synth-osc-row input[type="range"],
+.synth-filter-row input[type="range"],
+.synth-adsr input[type="range"] {
+  width: 60px;
+  height: 3px;
+  appearance: none;
+  -webkit-appearance: none;
+  background: #333;
+  border-radius: 2px;
+  outline: none;
+}
+
+.synth-osc-row input[type="range"]::-webkit-slider-thumb,
+.synth-filter-row input[type="range"]::-webkit-slider-thumb,
+.synth-adsr input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #3498db;
+  cursor: pointer;
+}
+
+.synth-val {
+  font-size: 10px;
+  color: #666;
+  min-width: 40px;
+  font-family: monospace;
+}
+
+.synth-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.synth-filter-row select {
+  background: #2a2a2a;
+  color: #fff;
+  border: 1px solid #555;
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+.synth-adsr {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.synth-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+/* Mobile action bar — hidden on desktop */
+.mobile-actions {
+  display: none;
+}
+
+/* ===== Responsive / Mobile ===== */
+@media (max-width: 768px) {
+  .toolbar {
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 8px;
+  }
+
+  .project-name {
+    width: 100px;
+    font-size: 14px;
+  }
+
+  .toolbar-separator {
+    display: none;
+  }
+
+  .play-btn,
+  .tool-btn {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+
+  .bpm-input {
+    width: 42px;
+    font-size: 12px;
+    padding: 4px;
+  }
+
+  .tuplet-input {
+    width: 36px;
+    font-size: 12px;
+    padding: 4px;
+  }
+
+  .duration-select {
+    font-size: 12px;
+    padding: 4px 6px;
+  }
+
+  .main-area {
+    flex-direction: column;
+  }
+
+  .fretboard-container {
+    width: 100%;
+    min-width: unset;
+    height: 40vh;
+    min-height: 160px;
+    border-right: none;
+    border-bottom: 1px solid #333;
+    margin-right: 0;
+  }
+
+  .timeline-container {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .piano-spacer,
+  .piano-roll-scroll {
+    width: 48px;
+    min-width: 48px;
+  }
+
+  .piano-key-label {
+    font-size: 7px;
+  }
+
+  .settings-popup {
+    min-width: unset;
+    width: 90vw;
+    max-width: 420px;
+    padding: 16px;
+  }
+
+  .settings-popup-wide {
+    min-width: unset;
+  }
+
+  .mobile-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    background: #181818;
+    border-bottom: 1px solid #333;
+    overflow-x: auto;
+    flex-shrink: 0;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .mobile-actions::-webkit-scrollbar {
+    display: none;
+  }
+
+  .mobile-actions button {
+    background: #2a2a2a;
+    color: #fff;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+    min-width: 36px;
+    text-align: center;
+  }
+
+  .mobile-actions button:active {
+    background: #444;
+  }
+
+  .mobile-actions button.active {
+    background: #2980b9;
+    border-color: #3498db;
+  }
+
+  .mobile-actions-sep {
+    width: 1px;
+    height: 20px;
+    background: #444;
+    flex-shrink: 0;
+    margin: 0 2px;
+  }
+}
+
+@media (max-width: 480px) {
+  .toolbar > span[style] {
+    font-size: 10px !important;
+  }
+
+  .fretboard-container {
+    height: 35vh;
+  }
+
+  .play-btn,
+  .tool-btn {
+    padding: 5px 8px;
+    font-size: 11px;
+  }
+
+  .project-name {
+    width: 80px;
+    font-size: 13px;
+  }
+}
+
+.instance-color-menu-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1000;
+}
+.instance-color-menu {
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 6px;
+  padding: 8px 14px 8px 8px;
+  max-width: 195px;
+  max-height: 260px;
+  overflow: auto;
+}
+.selected-instance-color-button {
+  border: 1px solid #fff;
+}
+.instance-color-button-navigate-style {
+  background: #353535;
+  color: #fff;
+}
