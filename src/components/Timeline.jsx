@@ -60,6 +60,7 @@ export default function Timeline({
   setPosition,
   swing,
   swungDisplay,
+  activeInstanceScheme = null,
 }) {
   const bodyRef = useRef(null);
   const headerRef = useRef(null);
@@ -761,13 +762,17 @@ export default function Timeline({
               .filter(n => n.stringIndex === combo.stringIndex && n.beat > finalBeat)
               .reduce((min, n) => n.beat < min ? n.beat : min, Infinity);
             const maxDur = Math.max(0.01, nextOnString - finalBeat);
-            return [...truncated, {
+            const newNote = {
               stringIndex: combo.stringIndex,
               fret: combo.fret,
               beat: finalBeat,
               duration: Math.min(noteDuration, maxDur),
               velocity: defaultVelocity,
-            }];
+            };
+            if (activeInstanceScheme) {
+              newNote.instanceSchemeName = activeInstanceScheme;
+            }
+            return [...truncated, newNote];
           });
           setSelectedBeat(beat);
           setSelectedNotes(new Set());
@@ -900,7 +905,7 @@ export default function Timeline({
 
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
-  }, [playing, notes, selectedNotes, setSelectedNotes, setNotes, machineGunMode, noteDuration, saveSnapshot, yToPitch, freeMode, snapUnit, cellWidth, barSubdivisions, totalCols, defaultVelocity, setSelectedBeat, rowHeight, position, setPosition]);
+  }, [playing, notes, selectedNotes, setSelectedNotes, setNotes, machineGunMode, noteDuration, saveSnapshot, yToPitch, freeMode, snapUnit, cellWidth, barSubdivisions, totalCols, defaultVelocity, setSelectedBeat, rowHeight, position, setPosition, activeInstanceScheme]);
 
   // Sync vertical scroll from external source (fretboard)
   useEffect(() => {
@@ -1766,7 +1771,7 @@ export default function Timeline({
             const topPx = rowTopPx(note.stringIndex, note.fret);
             const duration = note.duration || 1;
             const noteWidth = durationToWidth(note.beat, duration, barSubdivisions, cellWidth) - 2;
-            const color = getNoteColor(note.stringIndex, note.fret);
+            const color = getNoteColor(note, i);
             return (
               <div key={`blur-${i}`} style={{
                 position: 'absolute',
@@ -1794,7 +1799,7 @@ export default function Timeline({
             const noteWidth = durationToWidth(note.beat, duration, barSubdivisions, cellWidth) - 2;
             const isPlaying = playing && currentBeat !== null &&
               currentBeat >= note.beat && currentBeat < note.beat + duration;
-            const color = getNoteColor(note.stringIndex, note.fret);
+            const color = getNoteColor(note, i);
             const vel = note.velocity ?? 0.8;
 
             const isGhost = note.ghost;

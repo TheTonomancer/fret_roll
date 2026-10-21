@@ -2688,3 +2688,28 @@ input[type="number"] {
     font-size: 13px;
   }
 }
+
+.instance-color-menu-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1000;
+}
+.instance-color-menu {
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 6px;
+  padding: 8px 14px 8px 8px;
+  max-width: 195px;
+  max-height: 260px;
+  overflow: auto;
+}
+.selected-instance-color-button {
+  border: 1px solid #fff;
+}
+.instance-color-button-navigate-style {
+  background: #353535;
+  color: #fff;
+}

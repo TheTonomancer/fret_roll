@@ -52,7 +52,8 @@ const DEFAULT_HOTKEYS = {
   clearSelection: { label: 'Clear Selection', description: 'Clear all selected notes', key: '`' },
   selectAll: { label: 'Select All', description: 'Select all notes on the current track', key: 'a', modifiers: { ctrl: true } },
   splitNote: { label: 'Split Note', description: 'Split selected notes at the playhead', key: 'e', modifiers: { ctrl: true } },
-  rhythmUnit: { label: 'Rhythm Unit', description: 'Toggle rhythmic unit (beat / bar)', key: 'b', modifiers: { shift: true } }
+  rhythmUnit: { label: 'Rhythm Unit', description: 'Toggle rhythmic unit (beat / bar)', key: 'b', modifiers: { shift: true } },
+  instanceColor: { label: 'Instance Color', description: 'Apply Instance color to selection / set for new notes', key: 'c' },
 };
 
 // Non-editable actions shown for reference in the hotkey manager.
@@ -158,5 +159,5 @@ export const EDITABLE_HOTKEYS = [
   'zoomIn', 'zoomOut', 'zoomWheel', 'verticalZoomIn', 'verticalZoomOut', 'verticalZoomWheel', 'velocityWheel',
   'machineGunMode', 'fingeringMode', 'positionMode', 'stringDown', 'stringUp',
   'transposeSemiDown', 'transposeSemiUp', 'transposeOctaveDown', 'transposeOctaveUp', 'selectAtPlayhead',
-  'clearSelection', 'selectAll', 'splitNote', 'cursorMode', 'cheatSheet', 'escape', 'rhythmUnit',
+  'clearSelection', 'selectAll', 'splitNote', 'cursorMode', 'cheatSheet', 'escape', 'rhythmUnit', 'instanceColor',
 ];

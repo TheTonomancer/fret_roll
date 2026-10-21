@@ -22,7 +22,7 @@ import NumberInput from './components/NumberInput';
 import './App.css';
 
 function createDefaultTrack(name = 'Track 1', instrument = 'clean-electric') {
-  return { id: crypto.randomUUID(), name, instrument, type: 'notes', notes: [], volume: 1, muted: false, solo: false, visible: true, bgOpacity: 0.2, schemeName: null, audioFileName: null, audioDuration: 0, audioOffset: 0, waveformPeaks: null };
+  return { id: crypto.randomUUID(), name, instrument, type: 'notes', notes: [], volume: 1, muted: false, solo: false, visible: true, bgOpacity: 0.2, schemeName: null, activeInstanceScheme: null, audioFileName: null, audioDuration: 0, audioOffset: 0, waveformPeaks: null };
 }
 
 function getPlayableTracks(tracks) {
@@ -57,6 +57,7 @@ function App() {
   const notes = activeTrack ? activeTrack.notes : [];
   const notesRef = useRef(notes);
   notesRef.current = notes;
+  const activeScheme = activeTrack?.activeInstanceScheme ?? null;
 
   // Helper: update only the active track's notes
   const setActiveNotes = useCallback((updater) => {
@@ -164,6 +165,12 @@ function App() {
   const playheadBeatRef = useRef(null);
   // Shared ref to the Timeline's scroll body so Fretboard drags can trigger its auto-pan.
   const timelineBodyRef = useRef(null);
+  const lastMousePosRef = useRef({ x: 0, y: 0 });
+  useEffect(() => {
+    const handler = (e) => { lastMousePosRef.current = { x: e.clientX, y: e.clientY }; };
+    window.addEventListener('mousemove', handler);
+    return () => window.removeEventListener('mousemove', handler);
+  }, []);
   const [selectedBeat, setSelectedBeat] = useState(0);
   const [subdivisions, setSubdivisions] = useState(4); // how many subdivisions per beat
   const [rhythmUnit, setRhythmUnit] = useState('beat'); // 'beat' | 'bar'
@@ -206,6 +213,15 @@ function App() {
   useEffect(() => {
     try { localStorage.setItem('guitar-roll-rhythm-alters-selected', String(rhythmAltersSelected)); } catch {}
   }, [rhythmAltersSelected]);
+  const [selectingSchemeClosesMenu, setSelectingSchemeClosesMenu] = useState(() => {
+    try {
+      const saved = localStorage.getItem('guitar-roll-selecting-scheme-closes-menu');
+      return saved === null ? true : saved === 'true';
+    } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('guitar-roll-selecting-scheme-closes-menu', String(selectingSchemeClosesMenu)); } catch {}
+  }, [selectingSchemeClosesMenu]);
   const [timeSignature, setTimeSignature] = useState([4, 4]); // [numerator, denominator]
   const unitBeats = rhythmUnit === 'bar' ? (timeSignature[0] || 4) : 1;
   const baseSubdivBeats = unitBeats / subdivisions;
@@ -321,6 +337,8 @@ function App() {
   const [fretboardZoom, setFretboardZoom] = useState(1);
   const [stringColors, setStringColors] = useState(['#ffffff', '#ffffff', '#ffffff', '#ffffff', '#ffffff', '#ffffff']);
   const [showSettings, setShowSettings] = useState(false);
+  const showSettingsRef = useRef(showSettings);
+  showSettingsRef.current = showSettings;
   const [hotkeys, setHotkeys] = useState(loadHotkeys);
   const hotkeysRef = useRef(hotkeys);
   hotkeysRef.current = hotkeys;
@@ -329,6 +347,10 @@ function App() {
   const [showCheatSheet, setShowCheatSheet] = useState(false);
   const [showSubdivDial, setShowSubdivDial] = useState(false);
   const subdivDialRef = useRef(null);
+  const [showInstanceColorMenu, setShowInstanceColorMenu] = useState(false);
+  const instanceColorMenuRef = useRef(showInstanceColorMenu);
+  instanceColorMenuRef.current = showInstanceColorMenu;
+  const [instanceColorMenuPos, setInstanceColorMenuPos] = useState({ left: window.innerWidth / 2, top: window.innerHeight / 2, right: null });
   const [showMultDial, setShowMultDial] = useState(false);
   const multDialRef = useRef(null);
   const [showSynthEditor, setShowSynthEditor] = useState(false);
@@ -353,6 +375,12 @@ function App() {
   useEffect(() => {
     saveSessionSchemeState(sessionScheme, sessionSchemes);
   }, [sessionScheme, sessionSchemes]);
+
+  useEffect(() => {
+    if (showInstanceColorMenu) {
+      setShowInstanceColorMenu(false);
+    }
+  }, [selectedNotes.size]);
 
   const bpmRef = useRef(bpm);
   const metronomeRef = useRef(metronome);
@@ -408,13 +436,35 @@ function App() {
     ? (sessionSchemes?.[activeTrack.schemeName] || listColorSchemes()[activeTrack.schemeName] || null)
     : null;
 
-  const getNoteColor = useCallback((stringIndex, fret) => {
+  const getNoteColor = useCallback((stringIndexOrNote, fretOrMaybe, noteIndexOrMaybe) => {
+    let stringIndex, fret, note;
+    if (typeof stringIndexOrNote === 'object' && stringIndexOrNote !== null) {
+      stringIndex = stringIndexOrNote.stringIndex;
+      fret = stringIndexOrNote.fret;
+      note = stringIndexOrNote;
+    } else {
+      stringIndex = stringIndexOrNote;
+      fret = fretOrMaybe;
+      if (typeof noteIndexOrMaybe === 'number') {
+        note = notesRef.current[noteIndexOrMaybe];
+      }
+    }
     const name = getNoteName(stringIndex, fret);
     const letter = name.replace(/[0-9]/g, '');
+    if (note?.instanceSchemeName) {
+      const scheme = (sessionSchemes?.[note.instanceSchemeName] || listColorSchemes()[note.instanceSchemeName]) || null;
+      if (scheme && scheme[letter]) return scheme[letter];
+    }
     if (activeTrackScheme && activeTrackScheme[letter]) return activeTrackScheme[letter];
+    if (sessionScheme?.name) {
+      const gscheme = (sessionSchemes?.[sessionScheme.name] || listColorSchemes()[sessionScheme.name] || sessionScheme.colors || null);
+      if (gscheme && gscheme[letter]) return gscheme[letter];
+    } else if (sessionScheme?.colors && sessionScheme.colors[letter]) {
+      return sessionScheme.colors[letter];
+    }
     if (synesthesiaMap[letter]) return synesthesiaMap[letter];
     return stringColors[stringIndex];
-  }, [stringColors, synesthesia, activeTrackScheme, sessionSchemes]);
+  }, [stringColors, synesthesia, activeTrackScheme, sessionSchemes, sessionScheme]);
 
   // Apply partial state from settings/load/URL
   const applyState = useCallback((data) => {
@@ -746,7 +796,7 @@ setPositionModeValue(null);
           return next >= totalBeats - 1 ? totalBeats - 1 : Math.round(next / snap) * snap;
         });
       }
-      if (matchesHotkey(e, hk.returnToStart)) {
+      if (matchesHotkey(e, hk.returnToStart) && !instanceColorMenuRef.current) {
         e.preventDefault();
         setSelectedBeat(0);
       }
@@ -810,6 +860,34 @@ setPositionModeValue(null);
       if (matchesHotkey(e, hk.rhythmUnit)) {
         e.preventDefault();
         setRhythmUnit(u => u === 'beat' ? 'bar' : 'beat');
+      }
+      if (matchesHotkey(e, hk.instanceColor)) {
+        e.preventDefault();
+        if (showSettingsRef.current) return;
+        const next = !instanceColorMenuRef.current;
+        setShowInstanceColorMenu(next);
+        if (next) {
+          const body = timelineBodyRef.current;
+          const pos = lastMousePosRef.current;
+          let x = window.innerWidth / 2;
+          let y = window.innerHeight / 2;
+          if (body) {
+            const rect = body.getBoundingClientRect();
+            if (pos.x >= rect.left && pos.x <= rect.right && pos.y >= rect.top && pos.y <= rect.bottom) {
+              const midX = rect.left + rect.width / 2;
+              if (pos.x < midX) {
+                setInstanceColorMenuPos({ left: pos.x + 12, top: pos.y + 12, right: null });
+                return;
+              } else {
+                setInstanceColorMenuPos({ left: null, top: pos.y + 12, right: window.innerWidth - pos.x + 12 });
+                return;
+              }
+            }
+          }
+          setInstanceColorMenuPos({ left: x, top: y, right: null });
+        } else if (selectedNotesRef.current.size === 0) {
+          setTracksTracked(prev => prev.map(t => t.id === activeTrackId ? { ...t, activeInstanceScheme: null } : t));
+        }
       }
       if (matchesHotkey(e, hk.selectAtPlayhead)) {
         e.preventDefault();
@@ -1087,9 +1165,9 @@ setPositionModeValue(null);
       n => n.stringIndex === stringIndex && n.fret === fret && Math.abs(n.beat - beat) < 0.001
     );
     const willAutoForward = exactMatch < 0 && fretboardAutoForward !== stayInPlace;
-    if (willAutoForward) {
-      autoForwardLastActionRef.current = true;
-    }
+      if (willAutoForward) {
+        autoForwardLastActionRef.current = true;
+      }
     setNotes(prev => {
       if (exactMatch >= 0) {
         return prev.filter((_, i) => i !== exactMatch);
@@ -1097,7 +1175,7 @@ setPositionModeValue(null);
       const filtered = prev.filter(
         n => !(n.stringIndex === stringIndex && Math.abs(n.beat - beat) < 0.001)
       );
-      return [...filtered, { stringIndex, fret, beat, duration: effectiveNoteLength, velocity: defaultVelocity }];
+      return [...filtered, { stringIndex, fret, beat, duration: effectiveNoteLength, velocity: defaultVelocity, instanceSchemeName: activeTrack?.activeInstanceScheme ?? null }];
     });
     // Only advance playhead when adding a note, not when erasing
     if (willAutoForward) {
@@ -1107,7 +1185,7 @@ setPositionModeValue(null);
       });
       autoForwardLastActionRef.current = false;
     }
-  }, [selectedBeat, effectiveNoteLength, snapUnit, totalBeats, defaultVelocity, fretboardAutoForward, notes]);
+  }, [selectedBeat, effectiveNoteLength, snapUnit, totalBeats, defaultVelocity, fretboardAutoForward, notes, activeScheme]);
   const handleAdjacentClick = useCallback((stringIndex, fret, stayInPlace = false) => {
     const beat = Math.round(selectedBeat / snapUnit) * snapUnit;
     const exactMatch = notes.findIndex(
@@ -1124,7 +1202,7 @@ setPositionModeValue(null);
       if (idx >= 0) {
         return prev.filter((_, i) => i !== idx);
       }
-      return [...prev, { stringIndex, fret, beat, duration: effectiveNoteLength, velocity: defaultVelocity }];
+      return [...prev, { stringIndex, fret, beat, duration: effectiveNoteLength, velocity: defaultVelocity, instanceSchemeName: activeScheme }];
     });
     if (willAutoForward) {
       setSelectedBeat(b => {
@@ -1133,7 +1211,7 @@ setPositionModeValue(null);
       });
       autoForwardLastActionRef.current = false;
     }
-  }, [selectedBeat, effectiveNoteLength, snapUnit, totalBeats, defaultVelocity, fretboardAutoForward, fretboardAutoForwardExcludeAdjacent, notes]);
+  }, [selectedBeat, effectiveNoteLength, snapUnit, totalBeats, defaultVelocity, fretboardAutoForward, fretboardAutoForwardExcludeAdjacent, notes, activeScheme]);
 
   const handleMoveNote = useCallback((fromString, fromFret, toString, toFret) => {
     setNotes(prev => {
@@ -1783,7 +1861,7 @@ setPositionModeValue(null);
         </button>
         <button
           className="tool-btn"
-          onClick={() => setShowSettings(true)}
+          onClick={() => { setShowSettings(true);}}
           title="Settings"
         >
           Settings
@@ -2103,7 +2181,8 @@ setPositionModeValue(null);
           fretboardAutoForward={fretboardAutoForward}
           swing={swing}
           swungDisplay={swungDisplay}
-         />
+          activeInstanceScheme={activeTrack?.activeInstanceScheme || null}
+        />
         <Timeline
           notes={notes}
           backgroundNotes={tracks.filter(t => t.id !== activeTrackId && t.visible !== false).flatMap(t =>
@@ -2191,6 +2270,7 @@ setPositionModeValue(null);
           setPosition={setPosition}
           swing={swing}
           swungDisplay={swungDisplay}
+          activeInstanceScheme={activeTrack?.activeInstanceScheme || null}
         />
         <div className={`chord-sidebar ${chordPaletteOpen ? 'open' : ''}`}>
           <button className="chord-sidebar-toggle" onClick={() => setChordPaletteOpen(o => !o)}>
@@ -2326,9 +2406,120 @@ setPositionModeValue(null);
           onResetMultOnSubdivChange={(v) => { setResetMultOnSubdiv(v); try { localStorage.setItem('guitar-roll-reset-mult-on-subdiv', String(v)); } catch {} }}
           rhythmAltersSelected={rhythmAltersSelected}
           onRhythmAltersSelectedChange={(v) => { setRhythmAltersSelected(v); try { localStorage.setItem('guitar-roll-rhythm-alters-selected', String(v)); } catch {} }}
+          selectingSchemeClosesMenu={selectingSchemeClosesMenu}
+          onSelectingSchemeClosesMenuChange={(v) => { setSelectingSchemeClosesMenu(v); try { localStorage.setItem('guitar-roll-selecting-scheme-closes-menu', String(v)); } catch {} }}
           onHotkeysChange={setHotkeys}
         />
       )}
+      {showInstanceColorMenu && (
+        <InstanceColorMenu
+          position={instanceColorMenuPos}
+          sessionSchemes={sessionSchemes}
+          selectedNotes={selectedNotes}
+          highlightScheme={
+            (() => {
+              if (selectedNotes.size > 0) {
+                const schemes = new Set();
+                selectedNotes.forEach(i => schemes.add(notes[i]?.instanceSchemeName));
+                return schemes.size === 1 ? [...schemes][0] : null;
+              }
+              return activeTrack?.activeInstanceScheme ?? null;
+            })()
+          }
+          onClose={() => setShowInstanceColorMenu(false)}
+          onApply={(schemeName) => {
+            if (selectedNotes.size > 0) {
+              setNotes(prev => prev.map((n, i) => selectedNotes.has(i) ? { ...n, instanceSchemeName: schemeName } : n));
+            } else {
+              setTracksTracked(prev => prev.map(t => t.id === activeTrackId ? { ...t, activeInstanceScheme: schemeName } : t));
+            }
+            if (selectingSchemeClosesMenu) {
+              setShowInstanceColorMenu(false);
+            }
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function InstanceColorMenu({ position, sessionSchemes, selectedNotes, highlightScheme, onClose, onApply }) {
+  const schemes = { ...sessionSchemes };
+  try {
+    const saved = JSON.parse(localStorage.getItem('guitar-roll-color-schemes') || '{}');
+    Object.assign(schemes, saved);
+  } catch {}
+  const schemeNames = Object.keys(schemes);
+  const containerRef = useRef(null);
+  const focusedIndexRef = useRef(0);
+  const [focusedIndex, setFocusedIndex] = useState(() => {
+    if (highlightScheme === null) return 0;
+    const idx = schemeNames.indexOf(highlightScheme);
+    return idx >= 0 ? idx + 1 : 0;
+  });
+  focusedIndexRef.current = focusedIndex;
+  useEffect(() => {
+    const esc = (e) => { if (e.key === 'Escape') onClose(); };
+    const nav = (e) => {
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        e.stopPropagation();
+        const total = 1 + schemeNames.length;
+        const delta = e.key === 'ArrowUp' ? -1 : 1;
+        const next = (focusedIndexRef.current + delta + total) % total;
+        focusedIndexRef.current = next;
+        setFocusedIndex(next);
+        setTimeout(() => {
+          const btn = containerRef.current?.querySelector('.instance-color-button-navigate-style');
+          btn?.scrollIntoView({ block: 'nearest' });
+        }, 0);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        const scheme = focusedIndexRef.current === 0 ? null : schemeNames[focusedIndexRef.current - 1];
+        onApply(scheme);
+      }
+    };
+    document.addEventListener('keydown', esc);
+    document.addEventListener('keydown', nav);
+    return () => {
+      document.removeEventListener('keydown', esc);
+      document.removeEventListener('keydown', nav);
+    };
+  }, [onClose, schemeNames.length, onApply]);
+  useEffect(() => {
+    const btn = containerRef.current?.querySelector('.selected-instance-color-button');
+    btn?.scrollIntoView({ block: 'nearest' });
+  }, [highlightScheme]);
+  const getPreviewColors = (name) => {
+    const sc = schemes[name];
+    if (!sc) return [];
+    const notes = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+    return notes.map(n => sc[n]).filter(Boolean).slice(0, 12);
+  };
+  const left = position.left !== null && position.left !== undefined ? Math.min(position.left, window.innerWidth - 260) : 'auto';
+  const right = position.right !== null && position.right !== undefined ? position.right : 'auto';
+  const top = Math.min(position.top, window.innerHeight - 300);
+  return (
+    <div className="instance-color-menu-overlay" onClick={(e) => { if (e.target.classList.contains('instance-color-menu-overlay')) onClose(); }}>
+      <div ref={containerRef} className="instance-color-menu" style={{ position: 'absolute', left, top, right }}>
+        <div style={{ color: '#fff', fontSize: 12, marginBottom: 6, fontWeight: 'bold' }}>
+          {selectedNotes.size > 0 ? 'Instance color for selection' : 'Instance color for new notes'}
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <button className={`settings-btn-sm ${focusedIndex === 0 ? 'instance-color-button-navigate-style' : ''} ${highlightScheme === null ? 'selected-instance-color-button' : ''}`} onClick={() => onApply(null)} style={{ textAlign: 'left' }}>None</button>
+          {schemeNames.map((name, i) => (
+            <button key={name} className={`settings-btn-sm ${focusedIndex === i + 1 ? 'instance-color-button-navigate-style' : ''} ${highlightScheme === name ? 'selected-instance-color-button' : ''}`} onClick={() => onApply(name)} style={{ textAlign: 'left', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, maxWidth: '100%' }}>
+              <div className="scheme-colors-preview" style={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+                {getPreviewColors(name).map((c, ci) => (
+                  <div key={ci} className="scheme-color-dot" style={{ width: 10, height: 10, background: c, border: '1px solid #333' }} />
+                ))}
+              </div>
+              <span style={{ fontSize: 11, color: '#ddd', wordBreak: 'break-word', maxWidth: '100%' }}>{name}</span>
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

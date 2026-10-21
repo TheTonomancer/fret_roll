@@ -104,7 +104,7 @@ function getSessionSchemes(appState, savedSchemes) {
   });
 }
 
-export default function SettingsModal({ appState, onApplyState, onClose, onHotkeysChange, hoverPreview, onHoverPreviewChange, tupletLines, onTupletLinesChange, autoScroll, onAutoScrollChange, hoverPill, onHoverPillChange, autoSave, onAutoSaveChange, showTimelineVerticalZoomButtons, onShowTimelineVerticalZoomButtonsChange, fretboardAutoForward, onFretboardAutoForwardChange, fretboardAutoForwardExcludeAdjacent, onFretboardAutoForwardExcludeAdjacentChange, swungDisplay, onSwungDisplayChange, resetMultOnSubdiv, onResetMultOnSubdivChange, rhythmAltersSelected, onRhythmAltersSelectedChange }) {
+export default function SettingsModal({ appState, onApplyState, onClose, onHotkeysChange, hoverPreview, onHoverPreviewChange, tupletLines, onTupletLinesChange, autoScroll, onAutoScrollChange, hoverPill, onHoverPillChange, autoSave, onAutoSaveChange, showTimelineVerticalZoomButtons, onShowTimelineVerticalZoomButtonsChange, fretboardAutoForward, onFretboardAutoForwardChange, fretboardAutoForwardExcludeAdjacent, onFretboardAutoForwardExcludeAdjacentChange, swungDisplay, onSwungDisplayChange, resetMultOnSubdiv, onResetMultOnSubdivChange, rhythmAltersSelected, onRhythmAltersSelectedChange, selectingSchemeClosesMenu, onSelectingSchemeClosesMenuChange }) {
   const [page, setPage] = useState('main'); // main, schemes, editScheme, sessions, hotkeys
   const [editingScheme, setEditingScheme] = useState(null); // { name, originalName, colors }
   const [sessions, setSessions] = useState(listSessions);
@@ -482,6 +482,16 @@ export default function SettingsModal({ appState, onApplyState, onClose, onHotke
             <button className="settings-btn" onClick={() => setPage('schemes')}>
               Manage Color Schemes
             </button>
+            <div className="settings-row" style={{ marginTop: 6 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#ccc', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={selectingSchemeClosesMenu ?? true}
+                  onChange={(e) => onSelectingSchemeClosesMenuChange(e.target.checked)}
+                />
+                Selecting a scheme closes the instance-color menu
+              </label>
+            </div>
           </div>
 
           <div className="settings-group">Project</div>
