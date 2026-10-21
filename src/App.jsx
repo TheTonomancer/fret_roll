@@ -861,7 +861,7 @@ setPositionModeValue(null);
         e.preventDefault();
         setRhythmUnit(u => u === 'beat' ? 'bar' : 'beat');
       }
-      if (matchesHotkey(e, hk.applyInstanceColor)) {
+      if (matchesHotkey(e, hk.instanceColor)) {
         e.preventDefault();
         if (showSettingsRef.current) return;
         const next = !instanceColorMenuRef.current;
