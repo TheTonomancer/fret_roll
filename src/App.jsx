@@ -2443,6 +2443,20 @@ setPositionModeValue(null);
   );
 }
 
+const INSTANCE_MENU_HEIGHT_KEY = 'guitar-roll-instance-color-menu-height';
+const MIN_INSTANCE_MENU_HEIGHT = 100;
+const DEFAULT_INSTANCE_MENU_HEIGHT = 260;
+
+function readStoredInstanceMenuHeight() {
+  try {
+    const v = parseInt(localStorage.getItem(INSTANCE_MENU_HEIGHT_KEY) || '', 10);
+    if (Number.isFinite(v) && v >= MIN_INSTANCE_MENU_HEIGHT) {
+      return Math.min(v, Math.max(MIN_INSTANCE_MENU_HEIGHT, window.innerHeight - 40));
+    }
+  } catch {}
+  return null;
+}
+
 function InstanceColorMenu({ position, sessionSchemes, selectedNotes, highlightScheme, onClose, onApply }) {
   const schemes = { ...sessionSchemes };
   try {
@@ -2451,13 +2465,37 @@ function InstanceColorMenu({ position, sessionSchemes, selectedNotes, highlightS
   } catch {}
   const schemeNames = Object.keys(schemes);
   const containerRef = useRef(null);
+  const contentRef = useRef(null);
   const focusedIndexRef = useRef(0);
+  const suppressOverlayClickRef = useRef(false);
+  const [menuHeight, setMenuHeight] = useState(readStoredInstanceMenuHeight);
+  const [menuTop, setMenuTop] = useState(() => {
+    const stored = readStoredInstanceMenuHeight();
+    const effective = stored ?? DEFAULT_INSTANCE_MENU_HEIGHT;
+    const base = Math.min(position.top, window.innerHeight - effective - 12);
+    return Math.max(0, base);
+  });
+  const [resizing, setResizing] = useState(null);
+  const dragHeightRef = useRef(null);
+  const dragChangedRef = useRef(false);
   const [focusedIndex, setFocusedIndex] = useState(() => {
     if (highlightScheme === null) return 0;
     const idx = schemeNames.indexOf(highlightScheme);
     return idx >= 0 ? idx + 1 : 0;
   });
   focusedIndexRef.current = focusedIndex;
+  const scrollFocusedIntoView = (selector) => {
+    const content = contentRef.current;
+    const btn = content?.querySelector(selector);
+    if (!content || !btn) return;
+    const contentRect = content.getBoundingClientRect();
+    const btnRect = btn.getBoundingClientRect();
+    if (btnRect.top < contentRect.top) {
+      content.scrollTop -= (contentRect.top - btnRect.top) + 4;
+    } else if (btnRect.bottom > contentRect.bottom) {
+      content.scrollTop += (btnRect.bottom - contentRect.bottom) + 4;
+    }
+  };
   useEffect(() => {
     const esc = (e) => { if (e.key === 'Escape') onClose(); };
     const nav = (e) => {
@@ -2488,37 +2526,106 @@ function InstanceColorMenu({ position, sessionSchemes, selectedNotes, highlightS
     };
   }, [onClose, schemeNames.length, onApply]);
   useEffect(() => {
-    const btn = containerRef.current?.querySelector('.selected-instance-color-button');
-    btn?.scrollIntoView({ block: 'nearest' });
+     const btn = containerRef.current?.querySelector('.selected-instance-color-button');
+     btn?.scrollIntoView({ block: 'nearest' });
   }, [highlightScheme]);
+  useEffect(() => {
+    if (!resizing) return;
+    const prevUserSelect = document.body.style.userSelect;
+    document.body.style.userSelect = 'none';
+    const onMove = (e) => {
+      const dy = e.clientY - resizing.startY;
+       if (resizing.mode === 'bottom') {
+         const maxH = Math.min(window.innerHeight - resizing.startTop - 12, resizing.maxContentHeight);
+         const h = Math.max(MIN_INSTANCE_MENU_HEIGHT, Math.min(maxH, resizing.startHeight + dy));
+        dragHeightRef.current = h;
+        dragChangedRef.current = true;
+        setMenuHeight(h);
+      } else {
+        const bottom = resizing.startTop + resizing.startHeight;
+         let h = resizing.startHeight - dy;
+         let top = resizing.startTop + dy;
+         const maxH = resizing.maxContentHeight;
+         if (h > maxH) {
+           h = maxH;
+           top = resizing.startTop + resizing.startHeight - maxH;
+         }
+         if (h < MIN_INSTANCE_MENU_HEIGHT) {
+          h = MIN_INSTANCE_MENU_HEIGHT;
+          top = bottom - h;
+        }
+        if (top < 0) {
+          top = 0;
+          h = bottom;
+        }
+        dragHeightRef.current = h;
+        dragChangedRef.current = true;
+        setMenuHeight(h);
+        setMenuTop(top);
+      }
+    };
+    const onUp = () => {
+      if (dragChangedRef.current && dragHeightRef.current) {
+        try { localStorage.setItem(INSTANCE_MENU_HEIGHT_KEY, String(Math.round(dragHeightRef.current))); } catch {}
+      }
+      dragHeightRef.current = null;
+      dragChangedRef.current = false;
+      setResizing(null);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.userSelect = prevUserSelect;
+    };
+  }, [resizing]);
   const getPreviewColors = (name) => {
     const sc = schemes[name];
     if (!sc) return [];
     const notes = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
     return notes.map(n => sc[n]).filter(Boolean).slice(0, 12);
   };
+  const startResize = (mode) => (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    suppressOverlayClickRef.current = false;
+     const el = containerRef.current;
+     if (!el) return;
+     const rect = el.getBoundingClientRect();
+     const content = contentRef.current;
+     const maxContentHeight = (content?.scrollHeight ?? 0) + (rect.height - (content?.clientHeight ?? 0));
+     setResizing({ mode, startY: e.clientY, startTop: rect.top, startHeight: rect.height, maxContentHeight });
+  };
   const left = position.left !== null && position.left !== undefined ? Math.min(position.left, window.innerWidth - 260) : 'auto';
   const right = position.right !== null && position.right !== undefined ? position.right : 'auto';
-  const top = Math.min(position.top, window.innerHeight - 300);
+  const top = menuTop;
+  const menuStyle = menuHeight
+    ? { position: 'absolute', left, top, right, height: menuHeight, maxHeight: 'none' }
+    : { position: 'absolute', left, top, right };
   return (
-    <div className="instance-color-menu-overlay" onClick={(e) => { if (e.target.classList.contains('instance-color-menu-overlay')) onClose(); }}>
-      <div ref={containerRef} className="instance-color-menu" style={{ position: 'absolute', left, top, right }}>
-        <div style={{ color: '#fff', fontSize: 12, marginBottom: 6, fontWeight: 'bold' }}>
+      <div className="instance-color-menu-overlay" onClick={(e) => { if (e.target.classList.contains('instance-color-menu-overlay')) onClose(); }}>
+      <div ref={containerRef} className="instance-color-menu" style={menuStyle}>
+        <div className="instance-color-menu-resize-handle instance-color-menu-resize-handle-top" onMouseDown={startResize('top')} title="Drag to resize" />
+        <div className="instance-color-menu-title">
           {selectedNotes.size > 0 ? 'Instance color for selection' : 'Instance color for new notes'}
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <button className={`settings-btn-sm ${focusedIndex === 0 ? 'instance-color-button-navigate-style' : ''} ${highlightScheme === null ? 'selected-instance-color-button' : ''}`} onClick={() => onApply(null)} style={{ textAlign: 'left' }}>None</button>
-          {schemeNames.map((name, i) => (
-            <button key={name} className={`settings-btn-sm ${focusedIndex === i + 1 ? 'instance-color-button-navigate-style' : ''} ${highlightScheme === name ? 'selected-instance-color-button' : ''}`} onClick={() => onApply(name)} style={{ textAlign: 'left', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, maxWidth: '100%' }}>
-              <div className="scheme-colors-preview" style={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
-                {getPreviewColors(name).map((c, ci) => (
-                  <div key={ci} className="scheme-color-dot" style={{ width: 10, height: 10, background: c, border: '1px solid #333' }} />
-                ))}
-              </div>
-              <span style={{ fontSize: 11, color: '#ddd', wordBreak: 'break-word', maxWidth: '100%' }}>{name}</span>
-            </button>
-          ))}
+        <div className="instance-color-menu-content" ref={contentRef}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <button className={`settings-btn-sm ${focusedIndex === 0 ? 'instance-color-button-navigate-style' : ''} ${highlightScheme === null ? 'selected-instance-color-button' : ''}`} onClick={() => onApply(null)} style={{ textAlign: 'left' }}>None</button>
+            {schemeNames.map((name, i) => (
+              <button key={name} className={`settings-btn-sm ${focusedIndex === i + 1 ? 'instance-color-button-navigate-style' : ''} ${highlightScheme === name ? 'selected-instance-color-button' : ''}`} onClick={() => onApply(name)} style={{ textAlign: 'left', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, maxWidth: '100%' }}>
+                <div className="scheme-colors-preview" style={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+                  {getPreviewColors(name).map((c, ci) => (
+                    <div key={ci} className="scheme-color-dot" style={{ width: 10, height: 10, background: c, border: '1px solid #333' }} />
+                  ))}
+                </div>
+                <span style={{ fontSize: 11, color: '#ddd', wordBreak: 'break-word', maxWidth: '100%' }}>{name}</span>
+              </button>
+            ))}
+          </div>
         </div>
+        <div className="instance-color-menu-resize-handle instance-color-menu-resize-handle-bottom" onMouseDown={startResize('bottom')} title="Drag to resize" />
       </div>
     </div>
   );
