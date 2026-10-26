@@ -335,6 +335,7 @@ function App() {
     } catch { return true; }
   });
   const [fretboardZoom, setFretboardZoom] = useState(1);
+  const [fretboardWidth, setFretboardWidth] = useState(() => Number(localStorage.getItem('guitar-roll-fretboard-width')) || 350);
   const [stringColors, setStringColors] = useState(['#ffffff', '#ffffff', '#ffffff', '#ffffff', '#ffffff', '#ffffff']);
   const [showSettings, setShowSettings] = useState(false);
   const showSettingsRef = useRef(showSettings);
@@ -2166,6 +2167,7 @@ setPositionModeValue(null);
           hoverVolume={hoverPreview.volume}
           snapUnit={snapUnit}
           fretboardZoom={fretboardZoom}
+          width={fretboardWidth}
           setFretboardZoom={setFretboardZoom}
           voicingPreview={voicingPreview}
           autoScroll={autoScroll}
@@ -2182,6 +2184,28 @@ setPositionModeValue(null);
           swing={swing}
           swungDisplay={swungDisplay}
           activeInstanceScheme={activeTrack?.activeInstanceScheme || null}
+        />
+        <div
+          className="panel-resize-x"
+          style={{ cursor: 'col-resize', width: 6, flexShrink: 0, background: '#333' }}
+          onMouseDown={(e) => {
+            e.preventDefault()
+            const startX = e.clientX
+            const startW = fretboardWidth
+            const move = (mv) => {
+              const w = startW + (mv.clientX - startX)
+              setFretboardWidth(Math.max(120, Math.min(600, w)))
+            }
+            const up = () => {
+              window.removeEventListener('mousemove', move)
+              window.removeEventListener('mouseup', up)
+              try { localStorage.setItem('guitar-roll-fretboard-width', String(fretboardWidth)) } catch {}
+            }
+            window.addEventListener('mousemove', move)
+            window.addEventListener('mouseup', up)
+          }}
+          onDoubleClick={() => { setFretboardWidth(350); try { localStorage.setItem('guitar-roll-fretboard-width', '350') } catch {} }}
+          title="Drag to resize fretboard"
         />
         <Timeline
           notes={notes}
