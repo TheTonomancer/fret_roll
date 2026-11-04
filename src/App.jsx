@@ -2590,6 +2590,10 @@ function InstanceColorMenu({ position, sessionSchemes, selectedNotes, highlightS
         e.stopPropagation();
         const scheme = focusedIndexRef.current === 0 ? null : schemeNames[focusedIndexRef.current - 1];
         onApply(scheme);
+      } else if (e.key === 'c' || e.key === 'C') {
+        e.preventDefault();
+        e.stopPropagation();
+        onApply(null);
       }
     };
     document.addEventListener('keydown', esc);
