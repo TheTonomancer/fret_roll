@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import Fretboard from './components/Fretboard';
 import Timeline from './components/Timeline';
 import { playNote, playNoteAtTime, playClickAtTime, getAudioContext, getMasterOut, getNoteName, INSTRUMENTS, getAllInstruments, setInstrument, getInstrument, saveCustomPreset } from './utils/audio';
@@ -11,11 +11,12 @@ import { parseMidi, midiToGuitarNotes } from './utils/midiImport';
 import { stateFromUrl, saveChordLibrary, getSessionState, saveAutosave, loadAutosave, listColorSchemes, loadSessionSchemeState, saveSessionSchemeState } from './utils/storage';
 import { loadHotkeys, matchesHotkey, formatHotkey, REFERENCE_ACTIONS } from './utils/hotkeys';
 import { getMidiNote, closestComboForPitch, getComboForPosition } from './utils/pitchMap';
+import { computeStampVoices } from './utils/stamp';
 import { NUM_STRINGS, NUM_FRETS } from './utils/constants';
 import SettingsModal from './components/SettingsModal';
 import TrackStrip from './components/TrackStrip';
 import SynthEditor from './components/SynthEditor';
-import ChordPalette from './components/ChordPalette';
+import StampPanel from './components/StampPanel';
 import VoiceLeadingModal from './components/VoiceLeadingModal';
 import ConfirmDialog from './components/ConfirmDialog';
 import NumberInput from './components/NumberInput';
@@ -354,8 +355,11 @@ function App() {
   const [showMultDial, setShowMultDial] = useState(false);
   const multDialRef = useRef(null);
   const [showSynthEditor, setShowSynthEditor] = useState(false);
-  const [chordPreview, setChordPreview] = useState(null);
-  const [chordPaletteOpen, setChordPaletteOpen] = useState(false);
+  const [stampPreview, setStampPreview] = useState(null);
+  const [previewBlinking, setPreviewBlinking] = useState(false);
+  const [stampPanelOpen, setStampPanelOpen] = useState(false);
+  const [pendingStamp, setPendingStamp] = useState(null); // { id, voices } | null — armed stamp awaiting cursor placement
+  const [stampUsePosition, setStampUsePosition] = useState(false); // let the position system govern string-set jumps
   const [showVoiceLeading, setShowVoiceLeading] = useState(false);
   const [voicingPreview, setVoicingPreview] = useState(null); // [{ stringIndex, fret }] for fretboard highlight
   const [confirmClear, setConfirmClear] = useState(false);
@@ -403,6 +407,20 @@ function App() {
   const positionTimeoutRef = useRef(null);
 
   const timeSigRef = useRef(timeSignature);
+
+  // Stamp preview voices for the fretboard — dynamically anchored at the
+  // current hover pitch (timeline/piano/fretboard) when a stamp is selected,
+  // falling back to the static captured shape when only hovering a stamp button.
+  const fretboardStampPreviewVoices = useMemo(() => {
+    if (hoveredNote) {
+      if (!pendingStamp) return null; // dynamic anchoring only when stamp is armed
+      const anchorMidi = getMidiNote(hoveredNote.stringIndex, hoveredNote.fret);
+      const voices = computeStampVoices(pendingStamp.voices, anchorMidi, stampUsePosition, position, effectiveNoteLength);
+      return voices.length ? voices : pendingStamp.voices;
+    }
+    // Not hovering a surface — show static preview from button hover or armed shape
+    return stampPreview || (pendingStamp ? pendingStamp.voices : null);
+  }, [pendingStamp, hoveredNote, stampPreview, stampUsePosition, position, effectiveNoteLength]);
 
   // Keep refs in sync
   bpmRef.current = bpm;
@@ -651,6 +669,12 @@ function App() {
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.target.tagName === 'INPUT') return;
+      if (e.key === 'Escape' && !positionModeRef.current) {
+        setPendingStamp(null);
+        setStampPreview(null);
+        setPreviewBlinking(false);
+        return;
+      }
       const hk = hotkeysRef.current;
 
       // Position selection mode: number keys accumulate position value
@@ -1161,6 +1185,28 @@ setPositionModeValue(null);
 
   const handleFretClick = useCallback((stringIndex, fret, stayInPlace = false) => {
     const beat = Math.round(selectedBeat / snapUnit) * snapUnit;
+    // Stamp entry via fretboard click: enter the armed stamp at the playhead
+    // beat, anchored at the clicked string/fret.
+    if (pendingStamp) {
+      const anchorMidi = getMidiNote(stringIndex, fret);
+      const voices = computeStampVoices(pendingStamp.voices, anchorMidi, stampUsePosition, position, effectiveNoteLength);
+      const finalVoices = voices.length ? voices : pendingStamp.voices;
+      const newNotes = finalVoices.map((cn) => ({
+        stringIndex: cn.stringIndex,
+        fret: cn.fret,
+        beat: beat + (cn.beatOffset || 0),
+        duration: cn.duration || effectiveNoteLength,
+        velocity: defaultVelocity,
+        instanceSchemeName: activeTrack?.activeInstanceScheme ?? null,
+      }));
+      setNotes((prev) => {
+        const removeKeys = new Set(newNotes.map((n) => `${n.stringIndex}_${n.beat}`));
+        const filtered = prev.filter((n) => !removeKeys.has(`${n.stringIndex}_${n.beat}`));
+        return [...filtered, ...newNotes];
+      });
+      setPendingStamp(null);
+      return;
+    }
     const exactMatch = notes.findIndex(
       n => n.stringIndex === stringIndex && n.fret === fret && Math.abs(n.beat - beat) < 0.001
     );
@@ -1185,7 +1231,7 @@ setPositionModeValue(null);
       });
       autoForwardLastActionRef.current = false;
     }
-  }, [selectedBeat, effectiveNoteLength, snapUnit, totalBeats, defaultVelocity, fretboardAutoForward, notes, activeScheme]);
+  }, [selectedBeat, effectiveNoteLength, snapUnit, totalBeats, defaultVelocity, fretboardAutoForward, notes, activeScheme, pendingStamp, stampUsePosition, position]);
   const handleAdjacentClick = useCallback((stringIndex, fret, stayInPlace = false) => {
     const beat = Math.round(selectedBeat / snapUnit) * snapUnit;
     const exactMatch = notes.findIndex(
@@ -1555,22 +1601,40 @@ setPositionModeValue(null);
     setSelectedNotes(new Set());
   }, []);
 
-  const handleStampChord = useCallback((chordNotes) => {
-    const beat = selectedBeat;
-    const newNotes = chordNotes.map(cn => ({
+  // Arm / disarm a stamp for cursor-following placement on the timeline.
+  // Clicking the same armed stamp disarms it; clicking another switches arm.
+  const handleArmStamp = useCallback((chord, voices) => {
+    setPendingStamp((cur) => {
+      if (cur && cur.id === chord.id) return null;
+      return { id: chord.id, voices };
+    });
+    if (pendingStamp && pendingStamp.id === chord.id) {
+      setStampPreview(null);
+      setPreviewBlinking(false);
+    }
+  }, [pendingStamp]);
+
+  const handleStampCommit = useCallback((chordNotes, beat = selectedBeat, keepArmed = false) => {
+    if (!chordNotes || chordNotes.length === 0) return;
+    const newNotes = chordNotes.map((cn) => ({
       stringIndex: cn.stringIndex,
       fret: cn.fret,
       beat: beat + (cn.beatOffset || 0),
       duration: cn.duration || noteDuration,
       velocity: cn.velocity ?? defaultVelocity,
+      instanceSchemeName: activeTrack?.activeInstanceScheme ?? null,
     }));
-    setNotes(prev => {
-      // Remove existing notes at same string+beat positions
-      const removeKeys = new Set(newNotes.map(n => `${n.stringIndex}_${n.beat}`));
-      const filtered = prev.filter(n => !removeKeys.has(`${n.stringIndex}_${n.beat}`));
+    setNotes((prev) => {
+      const removeKeys = new Set(newNotes.map((n) => `${n.stringIndex}_${n.beat}`));
+      const filtered = prev.filter((n) => !removeKeys.has(`${n.stringIndex}_${n.beat}`));
       return [...filtered, ...newNotes];
     });
-  }, [selectedBeat, noteDuration, defaultVelocity]);
+    if (!keepArmed) {
+      setPendingStamp(null);
+      setStampPreview(null);
+      setPreviewBlinking(false);
+    }
+  }, [selectedBeat, noteDuration, defaultVelocity, activeTrack?.activeInstanceScheme]);
 
   // Track management
   const handleAddTrack = useCallback(() => {
@@ -2168,6 +2232,9 @@ setPositionModeValue(null);
           fretboardZoom={fretboardZoom}
           setFretboardZoom={setFretboardZoom}
           voicingPreview={voicingPreview}
+          stampPreviewVoices={fretboardStampPreviewVoices}
+          stampPreviewBlinking={previewBlinking}
+          activeInstanceScheme={activeTrack?.activeInstanceScheme || null}
           autoScroll={autoScroll}
           hoverPill={hoverPill}
           timelineBodyRef={timelineBodyRef}
@@ -2245,7 +2312,12 @@ setPositionModeValue(null);
           hoverPreviewNotes={hoverPreview.timelineNotes}
           hoverVolume={hoverPreview.volume}
           tupletLines={tupletLines}
-          chordPreview={chordPreview}
+          stampPreview={stampPreview}
+          pendingStamp={pendingStamp}
+          stampUsePosition={stampUsePosition}
+          previewBlinking={previewBlinking}
+          getNoteColor={getNoteColor}
+          onStampCommit={handleStampCommit}
           onTimelineHover={(pos) => setHoveredNote(pos)}
           autoScroll={autoScroll}
           markers={markers}
@@ -2272,19 +2344,21 @@ setPositionModeValue(null);
           swungDisplay={swungDisplay}
           activeInstanceScheme={activeTrack?.activeInstanceScheme || null}
         />
-        <div className={`chord-sidebar ${chordPaletteOpen ? 'open' : ''}`}>
-          <button className="chord-sidebar-toggle" onClick={() => setChordPaletteOpen(o => !o)}>
-            {chordPaletteOpen ? '>' : '<'}
+        <div className={`stamp-sidebar ${stampPanelOpen ? 'open' : ''}`}>
+          <button className="stamp-sidebar-toggle" onClick={() => setStampPanelOpen(o => !o)}>
+            {stampPanelOpen ? '>' : '<'}
           </button>
-          {chordPaletteOpen && (
-            <ChordPalette
+          {stampPanelOpen && (
+            <StampPanel
               notes={notes}
               selectedNotes={selectedNotes}
               selectedBeat={selectedBeat}
-              chordRoot={chordRoot}
+              stampRoot={chordRoot}
               noteDuration={effectiveNoteLength}
-              onStampChord={handleStampChord}
-              onPreviewChange={setChordPreview}
+              onStampCommit={handleStampCommit}
+              onPreviewChange={(voices, blinking) => { setStampPreview(voices); setPreviewBlinking(!!blinking); }}
+              onArmStamp={handleArmStamp}
+              armedId={pendingStamp?.id ?? null}
             />
           )}
         </div>
