@@ -5,6 +5,7 @@ import { playNote, getNoteName } from '../utils/audio';
 import { matchesHotkey, formatHotkey } from '../utils/hotkeys';
 import { createAutoPan } from '../utils/autoPan';
 import { beatToX as beatToXUtil } from '../utils/barLayout';
+import { hexToRgba, groupByBeatOffset } from '../utils/stamp';
 
 // totalBeats passed as prop (totalBeats)
 
@@ -17,7 +18,7 @@ const TOTAL_CELLS = NUM_FRETS + 1;
 
 
 
-export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, onDurationChange, onBeatChange, saveSnapshot, commitDrag, freeMode = false, totalBeats, activeNotes = [], backgroundActiveNotes = [], playingNotes = [], stringColors, getNoteColor, hoveredNote, setHoveredNote, hotkeys, hoverPreview = false, hoverVolume = 0.3, snapUnit = 1, fretboardZoom = 1, setFretboardZoom, voicingPreview, fingeringMode = false, onExitFingeringMode, onDeleteNote, notes = [], selectedBeat, selectedNotes, setSelectedNotes, autoScroll, hoverPill, timelineBodyRef, timelineZoom = 1, barSubdivisions = 4, position = 0, setPosition, setPlayheadPreview, setSelectedBeat, fretboardAutoForward = false, swing, swungDisplay }) {
+export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, onDurationChange, onBeatChange, saveSnapshot, commitDrag, freeMode = false, totalBeats, activeNotes = [], backgroundActiveNotes = [], playingNotes = [], stringColors, getNoteColor, hoveredNote, setHoveredNote, hotkeys, hoverPreview = false, hoverVolume = 0.3, snapUnit = 1, fretboardZoom = 1, setFretboardZoom, voicingPreview, fingeringMode = false, onExitFingeringMode, onDeleteNote, notes = [], selectedBeat, selectedNotes, setSelectedNotes, autoScroll, hoverPill, timelineBodyRef, timelineZoom = 1, barSubdivisions = 4, position = 0, setPosition, setPlayheadPreview, setSelectedBeat, fretboardAutoForward = false, swing, swungDisplay, stampPreviewVoices, stampPreviewBlinking, activeInstanceScheme }) {
   const FRET_HEIGHT = BASE_FRET_HEIGHT * fretboardZoom;
   const GRID_HEIGHT = TOTAL_CELLS * FRET_HEIGHT;
   const cellTopPx = (cell) => cell * FRET_HEIGHT;
@@ -735,6 +736,59 @@ export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, on
           }} />
         ))}
 
+        {/* Stamp preview on fretboard — mirrors timeline stamp preview */}
+        {stampPreviewVoices ? (
+          <div>
+            {stampPreviewBlinking ? (
+              groupByBeatOffset(stampPreviewVoices).map(({ voices: groupVoices, delay }) => (
+                <div key={`group-${delay}`} style={{ animation: `stamp-sequence-blink 1.2s ease-in-out infinite ${delay}s` }}>
+                  {groupVoices.map((v, i) => {
+                    const color = getNoteColor ? getNoteColor({ stringIndex: v.stringIndex, fret: v.fret, instanceSchemeName: activeInstanceScheme }) : null;
+                    return (
+                      <div key={`note-${i}`} style={{
+                        position: 'absolute',
+                        left: `${PADDING_LEFT + (v.stringIndex / (NUM_STRINGS - 1)) * (100 - PADDING_LEFT - PADDING_RIGHT)}%`,
+                        top: cellCenterPx(v.fret),
+                        width: 36,
+                        height: 16,
+                        borderRadius: 8,
+                        border: `2px solid ${color || '#6366f1'}`,
+                        background: color ? hexToRgba(color, 0.3) : 'rgba(99, 102, 241, 0.3)',
+                        transform: 'translate(-50%, -50%) rotate(-50deg)',
+                        pointerEvents: 'none',
+                        zIndex: 10,
+                        opacity: 'inherit',
+                        animation: 'none',
+                      }} />
+                    );
+                  })}
+                </div>
+              ))
+            ) : (
+              stampPreviewVoices.map((v, i) => {
+                const color = getNoteColor ? getNoteColor({ stringIndex: v.stringIndex, fret: v.fret, instanceSchemeName: activeInstanceScheme }) : null;
+                return (
+                  <div key={`note-${i}`} style={{
+                    position: 'absolute',
+                    left: `${PADDING_LEFT + (v.stringIndex / (NUM_STRINGS - 1)) * (100 - PADDING_LEFT - PADDING_RIGHT)}%`,
+                    top: cellCenterPx(v.fret),
+                    width: 36,
+                    height: 16,
+                    borderRadius: 8,
+                    border: `2px solid ${color || '#6366f1'}`,
+                    background: color ? hexToRgba(color, 0.3) : 'rgba(99, 102, 241, 0.3)',
+                    transform: 'translate(-50%, -50%) rotate(-50deg)',
+                    pointerEvents: 'none',
+                    zIndex: 10,
+                    opacity: 1,
+                    animation: 'none',
+                  }} />
+                );
+              })
+            )}
+          </div>
+        ) : null}
+
         {/* Fretboard marquee */}
         {fretMarquee && (
           <div style={{
@@ -1026,4 +1080,3 @@ export default function Fretboard({ onNoteClick, onAdjacentClick, onMoveNote, on
     </div>
   );
 }
-
