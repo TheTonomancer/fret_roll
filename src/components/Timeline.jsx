@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect, useLayoutEffect, useCallback } from 'react';
+import { useRef, useState, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
 import {
   NUM_STRINGS, NUM_FRETS, NUM_BARS, SUBDIVISIONS,
   CELL_WIDTH
@@ -11,6 +11,7 @@ import {
 import { totalColumns, barStartBeats, beatToBar, beatLabel, isBarStart, remapNotes, beatToX as beatToXUtil, xToBeat as xToBeatUtil, gridTotalWidth, colWidth, durationToWidth as durationToWidthUtil, timeToBeat } from '../utils/barLayout';
 import { matchesWheelHotkey } from '../utils/hotkeys';
 import { createAutoPan } from '../utils/autoPan';
+import { computeStampVoices as computeStampVoicesUtil, hexToRgba, groupByBeatOffset } from '../utils/stamp';
 
 const TOTAL_FRETS_PER_STRING = NUM_FRETS + 1;
 const totalRows = TOTAL_PITCH_ROWS;
@@ -50,7 +51,11 @@ export default function Timeline({
   onUpdateMarker,
   onDeleteMarker,
   onResizeDuration,
-  chordPreview,
+  stampPreview,
+  pendingStamp,
+  onStampCommit,
+  stampUsePosition = false,
+  previewBlinking = false,
   autoScroll,
   audioTracks = [],
   bpm = 120,
@@ -124,6 +129,24 @@ export default function Timeline({
     if (!result) return null;
     return { stringIndex: result.stringIndex, fret: result.fret, _newPosition: result.position };
   }, [rowHeight, position]);
+
+  // Compute where a stamped chord's voices land when anchored at the cursor's
+  // vertical pitch. See src/utils/stamp.js for the shared implementation.
+  const computeStampVoices = useCallback((voices, anchorMidi, usePosition, position) =>
+    computeStampVoicesUtil(voices, anchorMidi, usePosition, position, noteDuration), [noteDuration]);
+
+  const stampPreviewVoices = useMemo(() => {
+    if (!pendingStamp || !hoverPos) return []
+    const anchorMidi = getMidiNote(hoverPos.stringIndex, hoverPos.fret)
+    return computeStampVoices(pendingStamp.voices, anchorMidi, stampUsePosition, position)
+  }, [pendingStamp, hoverPos, stampUsePosition, position, computeStampVoices])
+
+  // Stamp preview anchored at the hovered piano/fretboard pitch, rendered at the playhead beat
+  const hoverStampPreviewVoices = useMemo(() => {
+    if (!pendingStamp || !hoveredNote) return []
+    const anchorMidi = getMidiNote(hoveredNote.stringIndex, hoveredNote.fret)
+    return computeStampVoices(pendingStamp.voices, anchorMidi, stampUsePosition, position)
+  }, [pendingStamp, hoveredNote, stampUsePosition, position, computeStampVoices])
 
   // Track K key for cursor-only mode (deselect + place cursor, no note input)
   useEffect(() => {
@@ -722,8 +745,17 @@ export default function Timeline({
         const rawBeat = xToBeat(x, barSubdivisions, cellWidth, false);
         beat = Math.round(rawBeat / snapUnit) * snapUnit;
       }
-      if (beat >= 0 && beat < totalCols) {
-        // Pick a string that isn't already occupied at this beat so chords can be placed
+        if (beat >= 0 && beat < totalCols) {
+          // Stamp placement mode: commit the armed stamp at the cursor beat
+          // and at the pitch under the cursor (vertical following).
+          if (pendingStamp) {
+            const voices = stampPreviewVoices.length ? stampPreviewVoices : pendingStamp.voices
+            onStampCommit?.(voices, beat, e.altKey)
+            setSelectedBeat(beat)
+            marqueeDidDragRef.current = true
+            return;
+          }
+          // Pick a string that isn't already occupied at this beat so chords can be placed
         const finalBeatForCombo = Math.round(beat * 10000) / 10000;
         const rowFromTop = Math.floor(y / rowHeight);
         const pitchRow = Math.max(0, Math.min(totalRows - 1, totalRows - 1 - rowFromTop));
@@ -905,7 +937,7 @@ export default function Timeline({
 
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
-  }, [playing, notes, selectedNotes, setSelectedNotes, setNotes, machineGunMode, noteDuration, saveSnapshot, yToPitch, freeMode, snapUnit, cellWidth, barSubdivisions, totalCols, defaultVelocity, setSelectedBeat, rowHeight, position, setPosition, activeInstanceScheme]);
+  }, [playing, notes, selectedNotes, setSelectedNotes, setNotes, machineGunMode, noteDuration, saveSnapshot, yToPitch, freeMode, snapUnit, cellWidth, barSubdivisions, totalCols, defaultVelocity, setSelectedBeat, rowHeight, position, setPosition, activeInstanceScheme, pendingStamp, onStampCommit, stampPreviewVoices]);
 
   // Sync vertical scroll from external source (fretboard)
   useEffect(() => {
@@ -1409,7 +1441,18 @@ export default function Timeline({
                       if (hoverPreviewPiano) playNote(repCombo.stringIndex, repCombo.fret, 0.15, hoverVolume);
                     }
                   }}
-                  onClick={() => {
+                  onClick={(e) => {
+                    // Stamp entry via piano click: enter the armed stamp at the
+                    // playhead beat, anchored at the hovered/clicked piano pitch.
+                    if (pendingStamp) {
+                      const anchorNote = hoveredNote || (repCombo ? { stringIndex: repCombo.stringIndex, fret: repCombo.fret } : null)
+                      if (anchorNote) {
+                        const anchorMidi = getMidiNote(anchorNote.stringIndex, anchorNote.fret)
+                        const voices = computeStampVoices(pendingStamp.voices, anchorMidi, stampUsePosition, position)
+                        onStampCommit?.(voices.length ? voices : pendingStamp.voices, selectedBeat, e.altKey)
+                        return;
+                      }
+                    }
                     if (repCombo && setChordRoot) {
                       // Toggle: click same key to deselect
                       if (chordRoot && noteToPitchRow(chordRoot.stringIndex, chordRoot.fret) === key.pitchRow) {
@@ -1456,7 +1499,7 @@ export default function Timeline({
               return;
             }
             setHoverPos({ beat: snapped, stringIndex: combo.stringIndex, fret: combo.fret });
-            if (onTimelineHover) onTimelineHover(null);
+            if (onTimelineHover) onTimelineHover({ stringIndex: combo.stringIndex, fret: combo.fret });
           }}
           onMouseLeave={() => {
             setHoverPos(null);
@@ -1712,32 +1755,136 @@ export default function Timeline({
             />
           )}
 
-          {/* Duration preview (green) — only visible when hovering the fretboard */}
-          {hoveredNote && selectedBeat !== null && !playing && (
-            <div
-              className="duration-preview"
-              style={{
-                left: beatToX(selectedBeat, barSubdivisions, cellWidth),
-                top: rowTopPx(hoveredNote.stringIndex, hoveredNote.fret),
-                width: durationToWidth(selectedBeat, noteDuration, barSubdivisions, cellWidth),
-                height: rowHeight,
-              }}
-            />
+          {/* Stamp preview at playhead when hovering piano/fretboard — anchors at hovered pitch */}
+          {pendingStamp && hoveredNote && !hoverPos && selectedBeat !== null && !playing && (
+            <>
+              {previewBlinking ? (
+                groupByBeatOffset(hoverStampPreviewVoices).map(({ voices: groupVoices, delay }) => (
+                  <div key={`group-${delay}`} style={{ animation: `stamp-sequence-blink 1.2s ease-in-out infinite ${delay}s` }}>
+                    {groupVoices.map((cn, i) => {
+                      const color = getNoteColor ? getNoteColor({ stringIndex: cn.stringIndex, fret: cn.fret, instanceSchemeName: activeInstanceScheme }) : null;
+                      return (
+                        <div
+                          key={`note-${i}`}
+                          className="stamp-preview-note"
+                          style={{
+                            left: beatToX(selectedBeat + (cn.beatOffset || 0), barSubdivisions, cellWidth),
+                            top: rowTopPx(cn.stringIndex, cn.fret),
+                            width: durationToWidth(selectedBeat + (cn.beatOffset || 0), cn.duration || noteDuration, barSubdivisions, cellWidth),
+                            height: rowHeight,
+                            background: color ? hexToRgba(color, 0.25) : undefined,
+                            borderColor: color || undefined,
+                            opacity: 'inherit',
+                            animation: 'none',
+                          }}
+                        />
+                      );
+                    })}
+                  </div>
+                ))
+              ) : (
+                hoverStampPreviewVoices.map((cn, i) => {
+                  const color = getNoteColor ? getNoteColor({ stringIndex: cn.stringIndex, fret: cn.fret, instanceSchemeName: activeInstanceScheme }) : null;
+                  return (
+                    <div
+                      key={`note-${i}`}
+                      className="stamp-preview-note"
+                      style={{
+                        left: beatToX(selectedBeat + (cn.beatOffset || 0), barSubdivisions, cellWidth),
+                        top: rowTopPx(cn.stringIndex, cn.fret),
+                        width: durationToWidth(selectedBeat + (cn.beatOffset || 0), cn.duration || noteDuration, barSubdivisions, cellWidth),
+                        height: rowHeight,
+                        background: color ? hexToRgba(color, 0.25) : undefined,
+                        borderColor: color || undefined,
+                        opacity: 1,
+                        animation: 'none',
+                      }}
+                    />
+                  );
+                })
+              )}
+            </>
           )}
 
-          {/* Chord preview (blinking) */}
-          {chordPreview && selectedBeat !== null && !playing && chordPreview.map((cn, i) => (
-            <div
-              key={`cp-${i}`}
-              className="chord-preview-note"
-              style={{
-                left: beatToX(selectedBeat + (cn.beatOffset || 0), barSubdivisions, cellWidth),
-                top: rowTopPx(cn.stringIndex, cn.fret),
-                width: durationToWidth(selectedBeat + (cn.beatOffset || 0), cn.duration || noteDuration, barSubdivisions, cellWidth),
-                height: rowHeight,
-              }}
-            />
-          ))}
+          {/* Stamp preview at selectedBeat — static while hovering a stamp button, blinking while a stamp is selected */}
+          {stampPreview && selectedBeat !== null && !playing && !hoverPos && !hoveredNote && (
+            <>
+              {previewBlinking ? (
+                groupByBeatOffset(stampPreview).map(({ voices: groupVoices, delay }) => (
+                  <div key={`group-${delay}`} style={{ animation: `stamp-sequence-blink 1.2s ease-in-out infinite ${delay}s` }}>
+                    {groupVoices.map((cn, i) => {
+                      const color = getNoteColor ? getNoteColor({ stringIndex: cn.stringIndex, fret: cn.fret, instanceSchemeName: activeInstanceScheme }) : null;
+                      return (
+                        <div
+                          key={`note-${i}`}
+                          className="stamp-preview-note"
+                          style={{
+                            left: beatToX(selectedBeat + (cn.beatOffset || 0), barSubdivisions, cellWidth),
+                            top: rowTopPx(cn.stringIndex, cn.fret),
+                            width: durationToWidth(selectedBeat + (cn.beatOffset || 0), cn.duration || noteDuration, barSubdivisions, cellWidth),
+                            height: rowHeight,
+                            background: color ? hexToRgba(color, 0.25) : undefined,
+                            borderColor: color || undefined,
+                            opacity: 'inherit',
+                            animation: 'none',
+                          }}
+                        />
+                      );
+                    })}
+                  </div>
+                ))
+              ) : (
+                stampPreview.map((cn, i) => {
+                  const color = getNoteColor ? getNoteColor({ stringIndex: cn.stringIndex, fret: cn.fret, instanceSchemeName: activeInstanceScheme }) : null;
+                  return (
+                    <div
+                      key={`note-${i}`}
+                      className="stamp-preview-note"
+                      style={{
+                        left: beatToX(selectedBeat + (cn.beatOffset || 0), barSubdivisions, cellWidth),
+                        top: rowTopPx(cn.stringIndex, cn.fret),
+                        width: durationToWidth(selectedBeat + (cn.beatOffset || 0), cn.duration || noteDuration, barSubdivisions, cellWidth),
+                        height: rowHeight,
+                        background: color ? hexToRgba(color, 0.25) : undefined,
+                        borderColor: color || undefined,
+                        opacity: 1,
+                        animation: 'none',
+                      }}
+                    />
+                  );
+                })
+              )}
+            </>
+          )}
+
+          {/* Stamp placement ghost — follows the cursor horizontally and vertically */}
+          {pendingStamp && hoverPos && !playing && (
+            <>
+              {groupByBeatOffset(stampPreviewVoices).map(({ voices: groupVoices, delay }) => (
+                <div key={`group-${delay}`} style={{ animation: `stamp-sequence-blink 1.2s ease-in-out infinite ${delay}s` }}>
+                  {groupVoices.map((cn, i) => {
+                    const color = getNoteColor ? getNoteColor({ stringIndex: cn.stringIndex, fret: cn.fret, instanceSchemeName: activeInstanceScheme }) : null;
+                    return (
+                      <div
+                        key={`note-${i}`}
+                        className="stamp-preview-note"
+                        style={{
+                          left: beatToX(hoverPos.beat + cn.beatOffset, barSubdivisions, cellWidth),
+                          top: rowTopPx(cn.stringIndex, cn.fret),
+                          width: durationToWidth(hoverPos.beat + cn.beatOffset, cn.duration, barSubdivisions, cellWidth),
+                          height: rowHeight,
+                          background: color ? hexToRgba(color, 0.25) : undefined,
+                          borderColor: color || undefined,
+                          opacity: 'inherit',
+                          animation: 'none',
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+              ))}
+            </>
+          )}
 
           {/* Background track notes (dimmed, non-interactive) */}
           {backgroundNotes.map((note, i) => {
